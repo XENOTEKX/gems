@@ -12,6 +12,8 @@
 #endif
 #include <iqtree_config.h>
 #include <numeric>
+#include <iomanip>     // std::setprecision, std::fixed for MF-TIME markers
+#include <sys/time.h>  // gettimeofday() fallback when not MPI
 #include "tree/phylotree.h"
 #include "tree/iqtree.h"
 #include "tree/phylotreemixlen.h"
@@ -1322,6 +1324,454 @@ void getRateHet(SeqType seq_type, string model_name, double frac_invariant_sites
     reorderModelNames(ratehet, rate_options, sizeof(rate_options) / sizeof(rate_options[0]));
 }
 
+// ============================================================================
+// CTF (coarse-to-fine) ModelFinder — Phase 4
+// ============================================================================
+
+/**
+ The CTF JOLT eligibility gate, mirroring ctf_rerank.py ineligible():
+ FreeRate (+R / +I+R) and pure-+I decline to CPU; everything else (incl. +I+G,
+ free-Q DNA) engages JOLT. MUST stay in lockstep with the in-tree JOLT
+ eligibility gate (phylotreegpu.cpp).
+ */
+static inline bool ctfIneligible(const string &name) {
+    return (name.find("+R") != string::npos) ||
+           (name.find("+I") != string::npos && name.find("+G") == string::npos);
+}
+
+/**
+ Faithful C++ port of ctf_rerank.py rerank() — the CTF coarse-stage gate.
+ Ranks ALL candidates ascending by their NATIVE subsample BIC (the value
+ getOrderedModels already filled in BIC_score at subsample N), then for the
+ top-K emits a refine/skip action. We use CandidateModel.df directly (NO
+ p-recovery from BIC — we have the exact param count from the checkpoint).
+
+ ineligible(name)         := name has "+R" OR ("+I" without "+G")
+ be := eligible candidate with min BIC ; bi := ineligible with min BIC (either may be null)
+ per top-K:  skip = ineligible(name) AND (be != null) AND (BIC > be.BIC + |df - be.df|/2)
+             else refine.
+ The skip gates on ineligible(name) ONLY — a skipped ELIGIBLE model would
+ silently corrupt selection.
+
+ Detector (diagnostic, logged): margin = |bi.df - be.df|/2, lead = be.BIC - bi.BIC,
+ flag = lead > margin (a +R/+I model genuinely leads the eligible best on the
+ subsample => eligible-refine may MISS the true winner).
+
+ Self-check below reproduces ctf_rerank fixtures A (LG+G4 native#1 refined,
+ LG+R5 skipped) and B (LG+R4 leads => refined). Returns top-K as
+ (full model name, skip-flag) pairs in BIC-ascending order.
+ */
+static vector<pair<string,bool> > selectCTFTopK(CandidateModelSet &ordered, int K, bool verbose) {
+    // ----- rank ALL candidates ascending by native subsample BIC -----
+    // (index into `ordered`; ordered[i].subst_name holds the FULL model name and
+    //  ordered[i].BIC_score / .df are the native-subsample values getOrderedModels filled in.)
+    vector<int> idx(ordered.size());
+    for (int i = 0; i < (int)ordered.size(); i++)
+        idx[i] = i;
+    std::stable_sort(idx.begin(), idx.end(),
+                     [&ordered](int a, int b) { return ordered[a].BIC_score < ordered[b].BIC_score; });
+
+    // ----- best eligible (be) and best ineligible (bi) by BIC -----
+    int be = -1, bi = -1;
+    for (int i = 0; i < (int)ordered.size(); i++) {
+        bool inel = ctfIneligible(ordered[i].getName());
+        if (!inel) {
+            if (be < 0 || ordered[i].BIC_score < ordered[be].BIC_score) be = i;
+        } else {
+            if (bi < 0 || ordered[i].BIC_score < ordered[bi].BIC_score) bi = i;
+        }
+    }
+
+    // ----- detector (diagnostic only — does NOT change selection) -----
+    if (be >= 0 && bi >= 0) {
+        double margin = fabs((double)(ordered[bi].df - ordered[be].df)) / 2.0;
+        double lead   = ordered[be].BIC_score - ordered[bi].BIC_score;  // >0 => an ineligible model LEADS
+        bool flag = lead > margin;
+        // verbose=false suppresses ALL detector output (used by ctfSelfTest so the
+        // fixtures never leak [CTF detector] lines into a production --ctf run; note
+        // NDEBUG is not defined in IQ-TREE's Release build, so the self-test runs).
+        if (verbose && getenv("JOLT_DEBUG"))
+            cout << "  [CTF detector] best_elig=" << ordered[be].getName()
+                 << "(" << ordered[be].BIC_score << ") best_inel=" << ordered[bi].getName()
+                 << "(" << ordered[bi].BIC_score << ") inel_lead=" << lead
+                 << " margin=" << margin << " RATE_HET_FLAG=" << (flag ? "true" : "false") << endl;
+        if (verbose && flag)
+            cout << "  [CTF detector] *** WARNING: a +R/+I model genuinely leads on the subsample — "
+                    "eligible-refine may MISS the true winner; needs +R JOLT or CPU full-refine ***" << endl;
+    }
+
+    // ----- per top-K refine/skip action -----
+    vector<pair<string,bool> > out;
+    int topk = min(K, (int)idx.size());
+    for (int r = 0; r < topk; r++) {
+        int i = idx[r];
+        bool inel = ctfIneligible(ordered[i].getName());
+        // refine eligible always; refine an ineligible model only if it could plausibly
+        // win (within the overfit margin of the best eligible); else SKIP it.
+        bool skip = inel && (be >= 0) &&
+                    (ordered[i].BIC_score > ordered[be].BIC_score
+                                            + fabs((double)(ordered[i].df - ordered[be].df)) / 2.0);
+        out.push_back(make_pair(ordered[i].getName(), skip));
+    }
+    return out;
+}
+
+#ifndef NDEBUG
+/**
+ Compile-time-cheap regression pinning ctf_rerank fixtures A and B for
+ selectCTFTopK. Runs once (static guard) the first time runCTFModelFinder is
+ entered. A: LG+G4 native#1 -> refine, LG+R5 ineligible & behind -> skip.
+ B: LG+R4 leads native BIC by > margin -> refined (leader never skipped).
+ */
+static void ctfSelfTest() {
+    auto mk = [](const string &name, double bic, int df) {
+        CandidateModel c;
+        c.subst_name = name;  // full name lives in subst_name (rate_name empty), matching getOrderedModels
+        c.rate_name = "";
+        c.BIC_score = bic; c.df = df;
+        return c;
+    };
+    // BIC values chosen so the natural BIC ordering equals fixture intent
+    // (smaller BIC = better). Fixture A: native #1 = LG+G4.
+    {
+        CandidateModelSet A;
+        // subsample m=5000: bic = -2*logL + df*ln(m). Mirror ctf_rerank fixture A.
+        double lm = log(5000.0);
+        A.push_back(mk("LG+G4",   -2*(-300000.000) + 198*lm, 198));
+        A.push_back(mk("LG+I+G4", -2*(-299999.500) + 199*lm, 199));
+        A.push_back(mk("LG+R5",   -2*(-299999.000) + 206*lm, 206));
+        A.push_back(mk("LG+I+R5", -2*(-299998.800) + 207*lm, 207));
+        A.push_back(mk("WAG+G4",  -2*(-300500.000) + 198*lm, 198));
+        vector<pair<string,bool> > top = selectCTFTopK(A, 4, false);
+        ASSERT(!top.empty() && top[0].first == "LG+G4" && top[0].second == false
+               && "CTF self-test A: LG+G4 must be native #1 and refined");
+        bool found_R5_skip = false;
+        for (auto &p : top) if (p.first == "LG+R5") { ASSERT(p.second == true && "CTF self-test A: LG+R5 must be skipped"); found_R5_skip = true; }
+        ASSERT(found_R5_skip && "CTF self-test A: LG+R5 must appear in top-4");
+    }
+    // Fixture B: LG+R4 leads native BIC => refined (leader never skipped).
+    {
+        CandidateModelSet B;
+        double lm = log(5000.0);
+        B.push_back(mk("LG+G4", -2*(-300100.000) + 198*lm, 198));
+        B.push_back(mk("LG+R4", -2*(-300000.000) + 204*lm, 204));
+        vector<pair<string,bool> > top = selectCTFTopK(B, 2, false);
+        ASSERT(!top.empty() && top[0].first == "LG+R4" && top[0].second == false
+               && "CTF self-test B: LG+R4 must lead native BIC and be refined");
+    }
+}
+#endif
+
+bool runCTFModelFinder(Params &params, IQTree &iqtree, ModelCheckpoint &model_info,
+                       string &best_subst_name, string &best_rate_name,
+                       map<string, vector<string> > nest_network)
+{
+    // CTF coverage guard: the coarse pass builds a plain Alignment/IQTree from
+    // iqtree.aln, so partitioned (SuperAlignment / PhyloSuperTree) and codon data
+    // are unsupported. Fall through to standard ModelFinder (return false) — params
+    // are untouched at this point, so the hand-off to runModelFinder is clean.
+    if (iqtree.isSuperTree() || iqtree.aln->seq_type == SEQ_CODON) {
+        cout << "NOTE: --ctf does not support "
+             << (iqtree.isSuperTree() ? "partitioned" : "codon")
+             << " data; using standard ModelFinder instead." << endl;
+        return false;
+    }
+#ifndef NDEBUG
+    {
+        static bool ran_selftest = false;
+        if (!ran_selftest) { ctfSelfTest(); ran_selftest = true; }
+    }
+#endif
+
+    double cpu_time = getCPUTime();
+    double real_time = getRealTime();
+
+    cout << endl << "=================== CTF (coarse-to-fine) ModelFinder ===================" << endl;
+
+    // --- bookkeeping that mirrors runModelFinder's setup ---
+    params.dating_mf = true;
+    model_info.setFileName((string)params.out_prefix + ".model.gz");
+    model_info.setDumpInterval(params.checkpoint_dump_interval);
+
+    // DNA nest network (mirrors runModelFinder lines 1339-1349)
+    if (nest_network.size() == 0 && iqtree.aln->seq_type == SEQ_DNA) {
+        StrVector model_names, freq_names;
+        getModelSubst(iqtree.aln->seq_type, iqtree.aln->isStandardGeneticCode(), params.model_name,
+                      params.model_set, params.model_subset, model_names);
+        getStateFreqs(iqtree.aln->seq_type, params.state_freq_set, freq_names);
+        nest_network = generateNestNetwork(model_names, freq_names);
+    }
+
+    Checkpoint *orig_checkpoint = iqtree.getCheckpoint();
+    ModelsBlock *models_block = readModelsDefinition(params);
+
+    // ---- save the params we mutate so they can be restored on the way out ----
+    string  saved_model_name      = params.model_name;
+    int     saved_min_iterations  = params.min_iterations;
+    STOP_CONDITION saved_stop_cond = params.stop_condition;
+
+    // ========================================================================
+    // STEP 1 — Subsample: pick min(ctf_subsample, nsite) DISTINCT seeded sites
+    // ========================================================================
+    size_t nsite = iqtree.aln->getNSite();
+    int Ksub = (int)min((size_t)params.ctf_subsample, nsite);
+    int seed = (params.ctf_seed >= 0) ? params.ctf_seed : params.ran_seed;
+
+    // seed a private permutation of [0,nsite) and take the first Ksub indices,
+    // then sort so extracted sites keep ascending order (REUSE init_random /
+    // my_random_shuffle; restore the global RNG afterwards so CTF does not
+    // perturb the rest of the run).
+    // Use a PRIVATE RNG stream (m1: don't overwrite / leak the global randstream).
+    int *ctf_rng = nullptr;
+    init_random(seed, false, &ctf_rng);
+    IntVector perm(nsite);
+    for (size_t i = 0; i < nsite; i++) perm[i] = (int)i;
+    my_random_shuffle(perm.begin(), perm.end(), ctf_rng);
+    finish_random(ctf_rng);
+
+    IntVector site_id(perm.begin(), perm.begin() + Ksub);
+    std::sort(site_id.begin(), site_id.end());
+
+    Alignment *sub_aln = new Alignment();
+    sub_aln->extractSites(iqtree.aln, site_id);
+    cout << "CTF: coarse-ranking " << "all candidate models on a "
+         << sub_aln->getNSite() << "-site subsample (seed " << seed << ") of "
+         << nsite << " sites" << endl;
+
+    // ========================================================================
+    // STEP 2 — Coarse pass on the subsample (GPU JOLT). Its OWN in-memory
+    // checkpoint (empty filename => never writes/clobbers the run's .model.gz).
+    // evaluateAll() has its OWN across-model OpenMP — we do NOT add our own.
+    // ========================================================================
+    // STEPS 2-4 are scoped in an inner block so coarse_tree / coarse_info /
+    // coarse_set / ordered (which all reference sub_aln) DESTRUCT before sub_aln
+    // is freed below (M1 use-after-free fix). Only `topk` (copied names + flags)
+    // and the coarse topology file escape the block.
+    vector<pair<string,bool> > topk;
+    string coarse_tree_file = (string)params.out_prefix + ".ctf_coarse.treefile";
+    bool coarse_ok = true;
+    {
+        IQTree coarse_tree(sub_aln);
+        coarse_tree.setParams(&params);
+        coarse_tree.setLikelihoodKernel(params.SSE);
+        coarse_tree.optimize_by_newton = params.optimize_by_newton;
+        coarse_tree.setNumThreads(params.num_threads);
+
+        ModelCheckpoint coarse_info;            // in-memory only — no setFileName()
+        coarse_tree.setCheckpoint(&coarse_info);
+        // PLL-based start trees (the default STT_PLL_PARSIMONY, also STT_RANDOM_TREE
+        // and any -pll run) need the PLL instance built first — mirror the main flow
+        // at phyloanalysis.cpp:3432. Without this, computeInitialTree dereferences a
+        // null pllInst (SIGSEGV "Create initial parsimony tree by PLL...").
+        if (params.start_tree == STT_PLL_PARSIMONY ||
+            params.start_tree == STT_RANDOM_TREE || params.pll)
+            coarse_tree.initializePLL(params);
+        coarse_tree.computeInitialTree(params.SSE);
+        coarse_tree.saveCheckpoint();
+
+        CandidateModelSet coarse_set;
+        coarse_set.nest_network = nest_network;
+        coarse_set.evaluateAll(params, &coarse_tree, coarse_info, models_block,
+                               params.num_threads, BRLEN_OPTIMIZE);
+
+        // ---- STEP 3: rerank + per-model refine/skip action (ctf_rerank gate) ----
+        CandidateModelSet ordered;
+        if (!coarse_info.getOrderedModels(&coarse_tree, ordered)) {
+            coarse_ok = false;
+        } else {
+            topk = selectCTFTopK(ordered, params.ctf_topk, true);
+            cout << "CTF: coarse native subsample-BIC ranking (top " << topk.size() << "):" << endl;
+            for (auto &p : topk)
+                cout << "    " << (p.second ? "SKIP   " : "refine ") << p.first << endl;
+            // ---- STEP 4: write the coarse topology ONCE (refines reuse it) ----
+            coarse_tree.printTree(coarse_tree_file.c_str(), WT_BR_LEN | WT_NEWLINE);
+        }
+    }   // coarse_tree/coarse_info/coarse_set/ordered destruct here (sub_aln still alive)
+
+    if (!coarse_ok) {
+        // coarse pass produced no ordered model list — fall back to monolithic MF
+        cout << "CTF: coarse pass produced no model list; falling back to standard ModelFinder" << endl;
+        delete models_block;
+        delete sub_aln;
+        params.model_name = saved_model_name;
+        params.min_iterations = saved_min_iterations;
+        params.stop_condition = saved_stop_cond;
+        return false;
+    }
+
+    // ========================================================================
+    // STEP 5 — Refine each non-skipped top-k model on the FULL data with the
+    // coarse topology fixed. STRICTLY SERIAL (one GPU). The WINNER's refine is
+    // run directly on &iqtree (R7 hand-off) and must be LAST.
+    // ========================================================================
+    // Fixed-topology, parameters-only optimisation: 0 tree-search iterations.
+    params.min_iterations = 0;
+    params.stop_condition = SC_FIXED_ITERATION;
+
+    int    best_idx = -1;          // index into topk of the full-data winner (by configured criterion)
+    double best_crit = DBL_MAX;    // winner's score under params.model_test_criterion
+    double best_logl = 0.0;
+    int    best_df = 0;
+    size_t full_ssize = iqtree.aln->getNSite();
+
+    // track best-by-each-IC NAME for the honest 3-line summary print
+    string best_name_AIC, best_name_AICc, best_name_BIC;
+    double best_AIC = DBL_MAX, best_AICc = DBL_MAX, best_BIC = DBL_MAX;
+
+    for (int t = 0; t < (int)topk.size(); t++) {
+        const string &mname = topk[t].first;
+        bool skip = topk[t].second;
+        if (skip) {
+            cout << "CTF: skipping full-data refine of " << mname << " (ineligible & behind best eligible)" << endl;
+            continue;
+        }
+
+        cout << "CTF: refining " << mname << " on full data (fixed coarse topology)..." << endl;
+
+        // Temp tree on the FULL alignment, with its OWN in-memory checkpoint so a
+        // non-winner refine never touches the run's model_info.
+        ModelCheckpoint refine_info;
+        IQTree *rtree = new IQTree(iqtree.aln);
+        rtree->setParams(&params);
+        rtree->setLikelihoodKernel(params.SSE);
+        rtree->optimize_by_newton = params.optimize_by_newton;
+        rtree->setNumThreads(params.num_threads);
+        rtree->setCheckpoint(&refine_info);
+        bool is_rooted = params.is_rooted;
+        rtree->readTree(coarse_tree_file.c_str(), is_rooted);
+        rtree->setAlignment(iqtree.aln);          // map leaf names -> alignment seq IDs
+        rtree->setRootNode(params.root);
+        rtree->initializeModel(params, mname, models_block);
+        rtree->getModelFactory()->restoreCheckpoint();
+        rtree->ensureNumberOfThreadsIsSet(&params);
+        rtree->initializeAllPartialLh();
+        rtree->optimizeModelParameters(false, params.modelfinder_eps);
+
+        double logl = rtree->getCurScore();
+        int    df   = rtree->getModelFactory()->getNParameters(BRLEN_OPTIMIZE);
+        double aic, aicc, bic;
+        computeInformationScores(logl, df, full_ssize, aic, aicc, bic);
+        cout << "CTF:   " << mname << "  logL=" << logl << "  df=" << df
+             << "  AIC=" << aic << "  AICc=" << aicc << "  BIC=" << bic << endl;
+
+        if (aic  < best_AIC)  { best_AIC  = aic;  best_name_AIC  = mname; }
+        if (aicc < best_AICc) { best_AICc = aicc; best_name_AICc = mname; }
+        if (bic  < best_BIC)  { best_BIC  = bic;  best_name_BIC  = mname; }
+
+        // winner = best under the configured criterion (BIC by default)
+        double crit = computeInformationScore(logl, df, full_ssize, params.model_test_criterion);
+        if (crit < best_crit) {
+            best_crit = crit; best_idx = t; best_logl = logl; best_df = df;
+        }
+        delete rtree;
+    }
+
+    if (best_idx < 0) {
+        // every top-k model was skipped (pathological) — fall back.
+        cout << "CTF: no model was refined on full data; falling back to standard ModelFinder" << endl;
+        delete models_block;
+        delete sub_aln;
+        params.model_name = saved_model_name;
+        params.min_iterations = saved_min_iterations;
+        params.stop_condition = saved_stop_cond;
+        return false;
+    }
+
+    string winner_name = topk[best_idx].first;
+    cout << "CTF: full-data winner (min " << criterionName(params.model_test_criterion) << ") = "
+         << winner_name << "  logL=" << best_logl << "  df=" << best_df << endl;
+
+    // ========================================================================
+    // STEP 6 — Run the WINNER's full-data refine DIRECTLY on &iqtree so iqtree
+    // ends holding the winner's optimized tree+params (R7), then replicate the
+    // runModelFinder tail (lines 1555-1584) exactly.
+    // ========================================================================
+    // Re-set the main iqtree's tree-eval state to match a fresh refine-loop rtree
+    // EXACTLY (that path is validated above). The main iqtree carries stale
+    // params/kernel/thread state from the main pipeline:
+    //  - missing setLikelihoodKernel/optimize_by_newton -> optimizeModelParameters
+    //    (JOLT) dereferences a stale likelihood kernel -> SIGSEGV;
+    //  - missing setNumThreads (num_threads<=0, since the main pipeline resolves
+    //    threads only AFTER ModelFinder) -> ensureNumberOfThreadsIsSet fires the
+    //    topology-mutating testNumThreads on the half-built winner tree -> SIGSEGV.
+    // params.num_threads is concrete here (explicit -nt, or resolved by the first
+    // refine in the AUTO case), so setNumThreads is a clean no-op then.
+    iqtree.setParams(&params);
+    iqtree.setLikelihoodKernel(params.SSE);
+    iqtree.optimize_by_newton = params.optimize_by_newton;
+    iqtree.setNumThreads(params.num_threads);
+    iqtree.setCheckpoint(&model_info);
+    {
+        bool is_rooted = params.is_rooted;
+        iqtree.readTree(coarse_tree_file.c_str(), is_rooted);
+        iqtree.setAlignment(iqtree.aln);          // map leaf names -> alignment seq IDs
+        iqtree.setRootNode(params.root);
+        iqtree.initializeModel(params, winner_name, models_block);
+        iqtree.getModelFactory()->restoreCheckpoint();
+        iqtree.ensureNumberOfThreadsIsSet(&params);
+        iqtree.initializeAllPartialLh();
+        iqtree.optimizeModelParameters(false, params.modelfinder_eps);
+        iqtree.saveCheckpoint();
+        iqtree.getModelFactory()->saveCheckpoint();
+    }
+
+    // Build the winner CandidateModel for the hand-off (subst/rate split). We
+    // re-evaluate IC scores at FULL N for the printed lines.
+    CandidateModel winner(winner_name, "", iqtree.aln);
+    winner.subst_name = iqtree.getSubstName();
+    winner.rate_name  = iqtree.getRateName();
+    winner.logl = iqtree.getCurScore();
+    winner.df   = best_df;
+    winner.computeICScores(iqtree.aln->getNSite());
+
+    // --- runModelFinder tail (lines 1555-1584), replicated ---
+    iqtree.aln->model_name = winner.getName();
+    best_subst_name = winner.subst_name;
+    best_rate_name  = winner.rate_name;
+
+    {
+        // print the best model NAME per criterion across the refined set (mirrors
+        // runModelFinder, which prints best_model_AIC/AICc/BIC = model names).
+        cout << "Akaike Information Criterion:           " << best_name_AIC  << endl;
+        cout << "Corrected Akaike Information Criterion: " << best_name_AICc << endl;
+        cout << "Bayesian Information Criterion:         " << best_name_BIC  << endl;
+        cout << "Best-fit model: " << iqtree.aln->model_name << " chosen according to "
+             << criterionName(params.model_test_criterion) << endl;
+    }
+
+    delete models_block;
+
+    // force to dump all checkpointing information
+    model_info.dump(true);
+
+    // transfer models parameters (reads Model/Rate/PhyloTree from iqtree's
+    // checkpoint == model_info, which now holds the winner) and restore the
+    // run's original checkpoint.
+    transferModelFinderParameters(&iqtree, orig_checkpoint);
+    iqtree.setCheckpoint(orig_checkpoint);
+
+    // ---- free temporaries & restore mutated params ----
+    delete sub_aln;
+    params.model_name     = saved_model_name;
+    params.min_iterations = saved_min_iterations;
+    params.stop_condition = saved_stop_cond;
+
+    params.startCPUTime = cpu_time;
+    params.start_real_time = real_time;
+    cpu_time = getCPUTime() - cpu_time;
+    real_time = getRealTime() - real_time;
+    cout << endl;
+    cout << "All model information printed to " << model_info.getFileName() << endl;
+    cout << "CPU time for CTF ModelFinder: " << cpu_time << " seconds (" << convert_time(cpu_time) << ")" << endl;
+    cout << "Wall-clock time for CTF ModelFinder: " << real_time << " seconds (" << convert_time(real_time) << ")" << endl;
+    cout << "========================================================================" << endl << endl;
+
+    // mirror runModelFinder test_only behaviour: CTF is a model-selection-only
+    // pass, so leave min_iterations consistent with -m MF/MFP semantics by
+    // honouring the saved value (already restored above).
+    return true;
+}
+
 void runModelFinder(Params &params, IQTree &iqtree, ModelCheckpoint &model_info, string &best_subst_name, string &best_rate_name, map<string, vector<string> > nest_network, bool under_mix_finder)
 {
     if (params.model_name.find("+T") != string::npos) {
@@ -1468,8 +1918,10 @@ void runModelFinder(Params &params, IQTree &iqtree, ModelCheckpoint &model_info,
 
         uint64_t mem_size = iqtree.getMemoryRequiredThreaded(max_cats);
         cout << "NOTE: ModelFinder requires " << (mem_size / 1024) / 1024 << " MB RAM!" << endl;
-        if (mem_size >= getMemorySize()) {
-            outError("Memory required exceeds your computer RAM size!");
+        // honour the cgroup/PBS/container allocation, not just physical RAM (a monolithic -m MF at scale on a
+        // shared node would otherwise pass this check against the node's physical RAM and then get cgroup-killed)
+        if (mem_size >= getAvailableMemory()) {
+            outError("Memory required exceeds your available RAM (cgroup/job allocation)! Use CTF (subsample coarse rank) or -mem.");
         }
     }
 #ifdef BINARY32
@@ -1518,6 +1970,25 @@ void runModelFinder(Params &params, IQTree &iqtree, ModelCheckpoint &model_info,
             cout << "Best-fit model: " << iqtree.aln->model_name << " chosen according to neural network" << endl;
         } else {
 #endif
+#ifdef _IQTREE_MPI
+            // Phase 1: force evaluateAll() for MPI dispatch — dispatch marks happen
+            // inside evaluateAll() after generate() populates the model list.
+            // Phase 3: partition the OMP thread budget across ranks sharing a node.
+            int orig_num_threads = params.num_threads;
+            // Always use evaluateAll() in MPI builds so np=1 and np=N use the
+            // same code path and produce consistent best-fit model selection.
+            // Phase 2 gather fires only when nranks > 1.
+            params.openmp_by_model = true;
+            if (MPIHelper::getInstance().getNumProcesses() > 1) {
+                int rank_threads = max(1, params.num_threads / params.mpi_ranks_per_node);
+                if (rank_threads != params.num_threads) {
+                    cout << "MF-MPI: thread budget per rank = " << rank_threads
+                         << " (" << params.num_threads << " total / "
+                         << params.mpi_ranks_per_node << " ranks/node)" << endl;
+                    params.num_threads = rank_threads;
+                }
+            }
+#endif
             if (params.openmp_by_model)
                 best_model = model_set.evaluateAll(params, &iqtree,
                                                              model_info, models_block, params.num_threads,
@@ -1525,6 +1996,10 @@ void runModelFinder(Params &params, IQTree &iqtree, ModelCheckpoint &model_info,
             else
                 best_model = model_set.test(params, &iqtree,
                                                       model_info, models_block, params.num_threads, BRLEN_OPTIMIZE);
+#ifdef _IQTREE_MPI
+            // Phase 3: restore thread count so subsequent tree search is unaffected.
+            params.num_threads = orig_num_threads;
+#endif
             iqtree.aln->model_name = best_model.getName();
             best_subst_name = best_model.subst_name;
             best_rate_name = best_model.rate_name;
@@ -1895,10 +2370,23 @@ void fixPartitions(PhyloSuperTree* super_tree) {
 string CandidateModel::evaluate(Params &params,
     ModelCheckpoint &in_model_info, ModelCheckpoint &out_model_info,
     ModelsBlock *models_block,
-    int &num_threads, int brlen_type)
+    int &num_threads, int brlen_type,
+    RateWarmStartCache *warm_start_cache)
 {
     //string model_name = name;
     Alignment *in_aln = aln;
+
+    // Phase A.1 warm-start: snapshot the shared cache into a thread-local
+    // copy under an OMP critical section, matching the Fix-G discipline used
+    // for in_model_info above. Reads against local_warm_start are then
+    // race-free for the rest of evaluate().
+    RateWarmStartCache local_warm_start;
+    if (warm_start_cache != nullptr) {
+#ifdef _OPENMP
+#pragma omp critical (warm_start_lock)
+#endif
+        { local_warm_start = *warm_start_cache; }
+    }
     IQTree *iqtree = nullptr;
     if (in_aln->isSuperAlignment()) {
         SuperAlignment *saln = (SuperAlignment*)in_aln;
@@ -1923,9 +2411,6 @@ string CandidateModel::evaluate(Params &params,
     iqtree->setNumThreads(num_threads);
 
     iqtree->setCheckpoint(&in_model_info);
-#ifdef _OPENMP
-#pragma omp critical
-#endif
     iqtree->restoreCheckpoint();
     ASSERT(iqtree->root);
     iqtree->initializeModel(params, getName(), models_block);
@@ -1934,18 +2419,61 @@ string CandidateModel::evaluate(Params &params,
         rate_name = iqtree->getRateName();
     }
 
-
     if (restoreCheckpoint(&in_model_info)) {
         delete iqtree;
         return "";
     }
 
-#ifdef _OPENMP
-#pragma omp critical
-#endif
     iqtree->getModelFactory()->restoreCheckpoint();
-    
+
     bool rate_restored = iqtree->getRate()->hasCheckpoint();
+
+    // Phase A.1 warm-start injection. Only fires when the per-model checkpoint
+    // does NOT already carry rate params (i.e. fresh fit). When rate_restored
+    // is true, the prior per-model values are known-good for THIS model and we
+    // must not perturb them. We honour the existing dispatch order: try the
+    // most-specific dynamic type first (RateGammaInvar before RateGamma, etc.)
+    // so cached params land on the right setters.
+    // See research/lbfgs-and-warmstart-implementation.md §5.4.
+    if (!rate_restored && warm_start_cache != nullptr && local_warm_start.any()) {
+        RateHeterogeneity *rate = iqtree->getRate();
+        if (rate != nullptr) {
+            if (RateGammaInvar *rgi = dynamic_cast<RateGammaInvar*>(rate)) {
+                if (local_warm_start.rgi_gamma_shape > 0)
+                    rgi->setGammaShape(local_warm_start.rgi_gamma_shape);
+                if (local_warm_start.rgi_p_invar > 0)
+                    rgi->setPInvar(local_warm_start.rgi_p_invar);
+            } else if (RateFreeInvar *rfi = dynamic_cast<RateFreeInvar*>(rate)) {
+                int k = rfi->getNRate();
+                if (k >= 0 && k < RateWarmStartCache::MAX_K
+                    && (int)local_warm_start.rfi_prop[k].size() == k
+                    && (int)local_warm_start.rfi_rates[k].size() == k) {
+                    for (int i = 0; i < k; i++) {
+                        rfi->setProp(i, local_warm_start.rfi_prop[k][i]);
+                        rfi->setRate(i, local_warm_start.rfi_rates[k][i]);
+                    }
+                    if (local_warm_start.rfi_p_invar[k] > 0)
+                        rfi->setPInvar(local_warm_start.rfi_p_invar[k]);
+                }
+            } else if (RateFree *rf = dynamic_cast<RateFree*>(rate)) {
+                int k = rf->getNRate();
+                if (k >= 0 && k < RateWarmStartCache::MAX_K
+                    && (int)local_warm_start.rf_prop[k].size() == k
+                    && (int)local_warm_start.rf_rates[k].size() == k) {
+                    for (int i = 0; i < k; i++) {
+                        rf->setProp(i, local_warm_start.rf_prop[k][i]);
+                        rf->setRate(i, local_warm_start.rf_rates[k][i]);
+                    }
+                }
+            } else if (RateGamma *rg = dynamic_cast<RateGamma*>(rate)) {
+                if (local_warm_start.rg_gamma_shape > 0)
+                    rg->setGammaShape(local_warm_start.rg_gamma_shape);
+            } else if (RateInvar *ri = dynamic_cast<RateInvar*>(rate)) {
+                if (local_warm_start.ri_p_invar > 0)
+                    ri->setPInvar(local_warm_start.ri_p_invar);
+            }
+        }
+    }
 
     // now switch to the output checkpoint
     iqtree->getModelFactory()->setCheckpoint(&out_model_info);
@@ -2044,9 +2572,16 @@ string CandidateModel::evaluate(Params &params,
                             init_weight = 1e-10; //set the weight to 0 at last time
 
                         if (step == 1) { // the weight of last class is too small, this model should not be restored by next model
+#ifdef _OPENMP
+#pragma omp critical
+{
+#endif
                             in_model_info.startStruct("OptModel");
                             in_model_info.putBool(getName()+".UnreliableParam",true);
                             in_model_info.endStruct();
+#ifdef _OPENMP
+}
+#endif
                         }
                         cout << getName() << " reinitialized from " + best_model + " with initial weight: " << init_weight << endl;
                     }
@@ -2124,6 +2659,82 @@ string CandidateModel::evaluate(Params &params,
 #ifdef _OPENMP
     }
 #endif
+
+    // Phase A.1 warm-start population. Capture converged rate params from the
+    // live RateHeterogeneity object before iqtree is destroyed, then update
+    // the shared cache under an OMP critical section (first-fit wins, no
+    // overwrite of already-cached values). Doing the capture here (rather
+    // than reading out_model_info post-evaluate) avoids any dependence on the
+    // checkpoint key format (CKP_SEP='!', see checkpoint.h) and works
+    // uniformly across all RateHeterogeneity subclasses.
+    // See research/lbfgs-and-warmstart-implementation.md §5.3.
+    if (warm_start_cache != nullptr && iqtree != nullptr && iqtree->getRate() != nullptr) {
+        RateHeterogeneity *rate = iqtree->getRate();
+
+        // Capture into stack locals first; lock only for the update.
+        double cap_rg_alpha = -1.0, cap_ri_pinv = -1.0;
+        double cap_rgi_alpha = -1.0, cap_rgi_pinv = -1.0;
+        int    cap_rf_k = -1, cap_rfi_k = -1;
+        double cap_rfi_pinv = -1.0;
+        std::vector<double> cap_rf_prop, cap_rf_rates;
+        std::vector<double> cap_rfi_prop, cap_rfi_rates;
+
+        if (RateGammaInvar *rgi = dynamic_cast<RateGammaInvar*>(rate)) {
+            cap_rgi_alpha = rgi->getGammaShape();
+            cap_rgi_pinv  = rgi->getPInvar();
+        } else if (RateFreeInvar *rfi = dynamic_cast<RateFreeInvar*>(rate)) {
+            cap_rfi_k = rfi->getNRate();
+            if (cap_rfi_k > 0 && cap_rfi_k < RateWarmStartCache::MAX_K) {
+                cap_rfi_prop.resize(cap_rfi_k);
+                cap_rfi_rates.resize(cap_rfi_k);
+                for (int i = 0; i < cap_rfi_k; i++) {
+                    cap_rfi_prop[i]  = rfi->getProp(i);
+                    cap_rfi_rates[i] = rfi->getRate(i);
+                }
+                cap_rfi_pinv = rfi->getPInvar();
+            }
+        } else if (RateFree *rf = dynamic_cast<RateFree*>(rate)) {
+            cap_rf_k = rf->getNRate();
+            if (cap_rf_k > 0 && cap_rf_k < RateWarmStartCache::MAX_K) {
+                cap_rf_prop.resize(cap_rf_k);
+                cap_rf_rates.resize(cap_rf_k);
+                for (int i = 0; i < cap_rf_k; i++) {
+                    cap_rf_prop[i]  = rf->getProp(i);
+                    cap_rf_rates[i] = rf->getRate(i);
+                }
+            }
+        } else if (RateGamma *rg = dynamic_cast<RateGamma*>(rate)) {
+            cap_rg_alpha = rg->getGammaShape();
+        } else if (RateInvar *ri = dynamic_cast<RateInvar*>(rate)) {
+            cap_ri_pinv = ri->getPInvar();
+        }
+
+#ifdef _OPENMP
+#pragma omp critical (warm_start_lock)
+#endif
+        {
+            // First-fit wins. Negative sentinel means "not yet cached".
+            if (cap_rg_alpha  > 0 && warm_start_cache->rg_gamma_shape   < 0)
+                warm_start_cache->rg_gamma_shape   = cap_rg_alpha;
+            if (cap_ri_pinv   > 0 && warm_start_cache->ri_p_invar       < 0)
+                warm_start_cache->ri_p_invar       = cap_ri_pinv;
+            if (cap_rgi_alpha > 0 && warm_start_cache->rgi_gamma_shape  < 0)
+                warm_start_cache->rgi_gamma_shape  = cap_rgi_alpha;
+            if (cap_rgi_pinv  > 0 && warm_start_cache->rgi_p_invar      < 0)
+                warm_start_cache->rgi_p_invar      = cap_rgi_pinv;
+            if (cap_rf_k > 0 && warm_start_cache->rf_prop[cap_rf_k].empty()) {
+                warm_start_cache->rf_prop [cap_rf_k] = cap_rf_prop;
+                warm_start_cache->rf_rates[cap_rf_k] = cap_rf_rates;
+            }
+            if (cap_rfi_k > 0 && warm_start_cache->rfi_prop[cap_rfi_k].empty()) {
+                warm_start_cache->rfi_prop [cap_rfi_k] = cap_rfi_prop;
+                warm_start_cache->rfi_rates[cap_rfi_k] = cap_rfi_rates;
+                if (cap_rfi_pinv > 0)
+                    warm_start_cache->rfi_p_invar[cap_rfi_k] = cap_rfi_pinv;
+            }
+        }
+    }
+
     delete iqtree;
     return tree_string;
 }
@@ -2859,20 +3470,36 @@ bool isMixtureModel(ModelsBlock *models_block, string &model_str) {
 void CandidateModelSet::filterRates(int finished_model) {
     if (Params::getInstance().score_diff_thres < 0)
         return;
+    // MF-MPI Fix C: use the first non-ignored substitution family as the
+    // reference for computing best_score.  In MPI mode ranks 1-3 have all
+    // LG/GTR models marked MF_IGNORED (they belong to rank 0), so using
+    // at(0).subst_name would always yield best_score = DBL_MAX and no pruning.
+    // Using the rank's own first assigned family (e.g. WAG on rank 1) gives
+    // a valid BIC reference and enables cross-family rate pruning on all ranks.
+    string ref_subst = at(0).subst_name;
+    for (int i = 0; i < (int)size(); i++) {
+        if (!at(i).hasFlag(MF_IGNORED)) {
+            ref_subst = at(i).subst_name;
+            break;
+        }
+    }
     double best_score = DBL_MAX;
     ASSERT(finished_model >= 0);
     int model;
     for (model = 0; model <= finished_model; model++)
-        if (at(model).subst_name == at(0).subst_name) {
+        if (at(model).subst_name == ref_subst) {
             if (!at(model).hasFlag(MF_DONE + MF_IGNORED))
                 return; // only works if all models done
-            best_score = min(best_score, at(model).getScore());
+            if (!at(model).hasFlag(MF_IGNORED))
+                best_score = min(best_score, at(model).getScore());
         }
-    
+    if (best_score == DBL_MAX)
+        return; // ref family not yet evaluated (all still running or all ignored)
+
     double ok_score = best_score + Params::getInstance().score_diff_thres;
     set<string> ok_rates;
     for (model = 0; model <= finished_model; model++)
-        if (at(model).getScore() <= ok_score) {
+        if (!at(model).hasFlag(MF_IGNORED) && at(model).getScore() <= ok_score) {
             string rate_name = at(model).orig_rate_name;
             ok_rates.insert(rate_name);
         }
@@ -2880,6 +3507,220 @@ void CandidateModelSet::filterRates(int finished_model) {
         if (ok_rates.find(at(model).orig_rate_name) == ok_rates.end() && !at(model).hasFlag(MF_CANNOT_BE_IGNORED))
             at(model).setFlag(MF_IGNORED);
 }
+
+#ifdef _IQTREE_MPI
+// ----------------------------------------------------------------------
+// FCA Phase 0.5 — cross-rank ok_rates broadcast.
+//
+// Why this exists: per-rank filterRates (Fix C) is fundamentally broken
+// when different ranks own different reference families with different
+// BIC selectivity. On AA 100K, rank 0 owns LG (sharp BIC, ok_rates={G4})
+// while ranks 1-3 own WAG/JTT/DCMUT (flat BIC, ok_rates={G4,R3,R4,I+G,...}).
+// Ranks 1-3 effectively don't prune -> 4-node MF wall regressed from
+// Fix H 2,335 s to FCA Phase 0 3,502 s (+50%).
+//
+// Algorithm (collective on all MPI ranks):
+//   1. Every rank locally computes its own ok_rates the same way
+//      filterRates() does. Only rank 0's set is canonical; ranks 1+
+//      produce permissive sets that we discard.
+//   2. Rank 0 serialises its ok_rates into a "rate1|rate2|..." string
+//      (max 2048 bytes -- far above the typical {"G4"} payload of 4 bytes)
+//      and MPI_Bcast's it from root=0.
+//   3. Every rank parses the broadcast string into global_ok_rates.
+//   4. Every rank marks MF_IGNORED on any local model that is not
+//      already DONE/IGNORED/CANNOT_BE_IGNORED and whose orig_rate_name
+//      is not in global_ok_rates.
+//
+// Single-fire guard via mpi_filterRatesMPI_fired (set true by caller).
+// Caller gates on mpi_filterRatesMPI_enabled (set by the MPI_Allreduce
+// in evaluateAll Step 8); if disabled, falls back to legacy filterRates.
+// ----------------------------------------------------------------------
+void CandidateModelSet::filterRatesMPI(int finished_model) {
+    if (Params::getInstance().score_diff_thres < 0)
+        return;
+
+    int my_rank = MPIHelper::getInstance().getProcessID();
+    int nranks  = MPIHelper::getInstance().getNumProcesses();
+
+    // -- Step 1: each rank computes its own ok_rates (same as filterRates()).
+    string ref_subst = at(0).subst_name;
+    for (int i = 0; i < (int)size(); i++) {
+        if (!at(i).hasFlag(MF_IGNORED)) {
+            ref_subst = at(i).subst_name;
+            break;
+        }
+    }
+    double best_score = DBL_MAX;
+    int m;
+    for (m = 0; m <= finished_model; m++)
+        if (at(m).subst_name == ref_subst) {
+            if (!at(m).hasFlag(MF_DONE + MF_IGNORED))
+                break; // ref family not complete on this rank -- skip local pruning
+            if (!at(m).hasFlag(MF_IGNORED))
+                best_score = min(best_score, at(m).getScore());
+        }
+
+    double ok_score = best_score + Params::getInstance().score_diff_thres;
+    set<string> local_ok_rates;
+    if (best_score != DBL_MAX) {
+        for (m = 0; m <= finished_model; m++)
+            if (!at(m).hasFlag(MF_IGNORED) && at(m).getScore() <= ok_score)
+                local_ok_rates.insert(at(m).orig_rate_name);
+    }
+
+    // -- Step 2: serialise rank 0's set into a fixed-size buffer.
+    const int BUF = 2048;
+    char buf[BUF];
+    memset(buf, 0, BUF);
+    if (my_rank == 0) {
+        string s;
+        for (const string &r : local_ok_rates) {
+            if (!s.empty()) s += "|";
+            s += r;
+        }
+        if ((int)s.size() >= BUF) s.resize(BUF - 1);
+        memcpy(buf, s.c_str(), s.size());
+    }
+
+    // -- Step 3: MPI_Bcast from root=0. Collective on MPI_COMM_WORLD.
+    MPI_Bcast(buf, BUF, MPI_CHAR, 0, MPI_COMM_WORLD);
+
+    // -- Phase A.2: broadcast rank 0's warm-start cache to all ranks.
+    // Rank 0 evaluates the ref-family first (Phase 0.6 ordering) and holds
+    // early-converged rate params (gamma-shape, p_invar, +R props/rates).
+    // Pack into a fixed-size POD struct (~3.6 KB) and broadcast with a
+    // single MPI_Bcast.  Non-root ranks seed their mpi_warm_start for any
+    // field not yet filled by their own evaluations (first-fit wins).
+    int ws_bcast_fields = 0;
+    {
+        struct WarmStartPacket {
+            double rg_gamma_shape;    // +G  alpha       sentinel = -1
+            double ri_p_invar;        // +I  p_invar     sentinel = -1
+            double rgi_gamma_shape;   // +I+G alpha      sentinel = -1
+            double rgi_p_invar;       // +I+G p_invar    sentinel = -1
+            double rf_prop [11][10];  // +Rk prop[k][i]  sentinel = -1
+            double rf_rates[11][10];  // +Rk rate[k][i]  sentinel = -1
+            double rfi_p_invar[11];   // +I+Rk p_invar   sentinel = -1
+            double rfi_prop [11][10]; // +I+Rk prop[k][i]sentinel = -1
+            double rfi_rates[11][10]; // +I+Rk rate[k][i]sentinel = -1
+        };
+        static_assert(sizeof(WarmStartPacket) % sizeof(double) == 0,
+                      "WarmStartPacket must be double-aligned");
+
+        WarmStartPacket pkt;
+        pkt.rg_gamma_shape = pkt.ri_p_invar =
+            pkt.rgi_gamma_shape = pkt.rgi_p_invar = -1.0;
+        for (int k = 0; k < 11; k++) {
+            pkt.rfi_p_invar[k] = -1.0;
+            for (int i = 0; i < 10; i++) {
+                pkt.rf_prop[k][i] = pkt.rf_rates[k][i] = -1.0;
+                pkt.rfi_prop[k][i] = pkt.rfi_rates[k][i] = -1.0;
+            }
+        }
+
+        if (my_rank == 0) {
+            pkt.rg_gamma_shape  = mpi_warm_start.rg_gamma_shape;
+            pkt.ri_p_invar      = mpi_warm_start.ri_p_invar;
+            pkt.rgi_gamma_shape = mpi_warm_start.rgi_gamma_shape;
+            pkt.rgi_p_invar     = mpi_warm_start.rgi_p_invar;
+            int klim = (int)mpi_warm_start.rf_prop.size();
+            for (int k = 1; k < 11 && k < klim; k++) {
+                if ((int)mpi_warm_start.rf_prop[k].size() == k)
+                    for (int i = 0; i < k && i < 10; i++) {
+                        pkt.rf_prop[k][i]  = mpi_warm_start.rf_prop[k][i];
+                        pkt.rf_rates[k][i] = mpi_warm_start.rf_rates[k][i];
+                    }
+                if (mpi_warm_start.rfi_p_invar[k] > 0)
+                    pkt.rfi_p_invar[k] = mpi_warm_start.rfi_p_invar[k];
+                if ((int)mpi_warm_start.rfi_prop[k].size() == k)
+                    for (int i = 0; i < k && i < 10; i++) {
+                        pkt.rfi_prop[k][i]  = mpi_warm_start.rfi_prop[k][i];
+                        pkt.rfi_rates[k][i] = mpi_warm_start.rfi_rates[k][i];
+                    }
+            }
+        }
+
+        MPI_Bcast(&pkt, sizeof(pkt), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+        // Count non-sentinel fields for diagnostics.
+        if (pkt.rg_gamma_shape  > 0) ws_bcast_fields++;
+        if (pkt.ri_p_invar      > 0) ws_bcast_fields++;
+        if (pkt.rgi_gamma_shape > 0) ws_bcast_fields++;
+        if (pkt.rgi_p_invar     > 0) ws_bcast_fields++;
+        for (int k = 1; k < 11; k++) {
+            if (pkt.rf_prop[k][0]  > 0) ws_bcast_fields++;
+            if (pkt.rfi_prop[k][0] > 0) ws_bcast_fields++;
+        }
+
+        // Unpack on non-root ranks; skip fields already populated (first-fit).
+        if (my_rank != 0) {
+            if (pkt.rg_gamma_shape  > 0 && mpi_warm_start.rg_gamma_shape  < 0)
+                mpi_warm_start.rg_gamma_shape  = pkt.rg_gamma_shape;
+            if (pkt.ri_p_invar      > 0 && mpi_warm_start.ri_p_invar      < 0)
+                mpi_warm_start.ri_p_invar      = pkt.ri_p_invar;
+            if (pkt.rgi_gamma_shape > 0 && mpi_warm_start.rgi_gamma_shape < 0)
+                mpi_warm_start.rgi_gamma_shape = pkt.rgi_gamma_shape;
+            if (pkt.rgi_p_invar     > 0 && mpi_warm_start.rgi_p_invar     < 0)
+                mpi_warm_start.rgi_p_invar     = pkt.rgi_p_invar;
+            for (int k = 1; k < 11; k++) {
+                if (pkt.rf_prop[k][0] > 0 && mpi_warm_start.rf_prop[k].empty()) {
+                    mpi_warm_start.rf_prop[k].resize(k);
+                    mpi_warm_start.rf_rates[k].resize(k);
+                    for (int i = 0; i < k && i < 10; i++) {
+                        mpi_warm_start.rf_prop[k][i]  = pkt.rf_prop[k][i];
+                        mpi_warm_start.rf_rates[k][i] = pkt.rf_rates[k][i];
+                    }
+                }
+                if (pkt.rfi_p_invar[k] > 0 && mpi_warm_start.rfi_p_invar[k] < 0)
+                    mpi_warm_start.rfi_p_invar[k] = pkt.rfi_p_invar[k];
+                if (pkt.rfi_prop[k][0] > 0 && mpi_warm_start.rfi_prop[k].empty()) {
+                    mpi_warm_start.rfi_prop[k].resize(k);
+                    mpi_warm_start.rfi_rates[k].resize(k);
+                    for (int i = 0; i < k && i < 10; i++) {
+                        mpi_warm_start.rfi_prop[k][i]  = pkt.rfi_prop[k][i];
+                        mpi_warm_start.rfi_rates[k][i] = pkt.rfi_rates[k][i];
+                    }
+                }
+            }
+        }
+    }
+
+    // -- Step 4: parse on all ranks (including 0 to keep code uniform).
+    set<string> global_ok_rates;
+    {
+        string s(buf);
+        size_t pos = 0, next;
+        while (pos < s.size()) {
+            next = s.find('|', pos);
+            if (next == string::npos) next = s.size();
+            string r = s.substr(pos, next - pos);
+            if (!r.empty()) global_ok_rates.insert(r);
+            pos = next + 1;
+        }
+    }
+
+    // -- Step 5: apply to local model list.
+    int pruned_here = 0;
+    for (m = finished_model + 1; m < (int)size(); m++) {
+        if (at(m).hasFlag(MF_DONE + MF_IGNORED + MF_CANNOT_BE_IGNORED))
+            continue;
+        if (global_ok_rates.find(at(m).orig_rate_name) == global_ok_rates.end()) {
+            at(m).setFlag(MF_IGNORED);
+            pruned_here++;
+        }
+    }
+
+    cout << "MF-MPI-DIAG: rank " << my_rank << "/" << nranks
+         << " filterRatesMPI fired at model=" << finished_model
+         << " ref_subst=" << ref_subst
+         << " |bcast_ok_rates|=" << global_ok_rates.size()
+         << " local_pruned=" << pruned_here
+         << " best_score=" << best_score
+         << " ws_bcast_fields=" << ws_bcast_fields
+         << endl;
+    cout.flush();
+}
+#endif // _IQTREE_MPI
 
 void CandidateModelSet::filterSubst(int finished_model) {
     if (Params::getInstance().score_diff_thres < 0)
@@ -3329,27 +4170,59 @@ CandidateModel CandidateModelSet::test(Params &params, PhyloTree* in_tree, Model
 }
 
 int64_t CandidateModelSet::getNextModel() {
-    int64_t next_model;
+    int64_t next_model = -1;
 #pragma omp critical
     {
-    if (size() == 0)
-        next_model = -1;
-    else if (current_model == -1)
-        next_model = 0;
-    else {
-        for (next_model = current_model+1; next_model != current_model; next_model++) {
-            if (next_model == size())
-                next_model = 0;
-            if (!at(next_model).hasFlag(MF_IGNORED + MF_WAITING + MF_RUNNING)) {
-                break;
+    if (size() > 0) {
+#ifdef _IQTREE_MPI
+        // FCA Phase 0.6 — ref-family priority.
+        //
+        // While the rank's reference family is incomplete AND the broadcast
+        // hasn't fired yet, prefer ref-family models so the rank reaches
+        // the collective MPI_Bcast point as soon as possible. Without this,
+        // ranks 1+ visit non-ref Block-2 entries first (one per assigned
+        // subst_name group), delaying ref completion by ~200-300 s and
+        // causing rank 0 to idle at the barrier.
+        //
+        // See setonix-iq/research/updated-modelfinder-dispatch.md §20 for
+        // the Block-2/Block-3 interleaving analysis.
+        if (mpi_filterRatesMPI_enabled
+            && !mpi_filterRatesMPI_fired
+            && mpi_ref_subst_idx >= 0
+            && mpi_ref_remaining > 0) {
+            const string &ref_subst = at(mpi_ref_subst_idx).subst_name;
+            int64_t start = (current_model == -1) ? 0
+                                                  : (current_model + 1) % (int64_t)size();
+            for (int64_t i = 0; i < (int64_t)size(); i++) {
+                int64_t m = (start + i) % (int64_t)size();
+                if (at(m).subst_name == ref_subst
+                    && !at(m).hasFlag(MF_IGNORED + MF_WAITING + MF_RUNNING)) {
+                    next_model = m;
+                    break;
+                }
+            }
+        }
+#endif
+        if (next_model == -1) {
+            // Standard scan (also corrects a latent bug: the original code
+            // returned next_model = 0 unconditionally on first call, even
+            // if model 0 had MF_IGNORED set for the calling rank under
+            // FCA dispatch).
+            int64_t start = (current_model == -1) ? 0
+                                                  : (current_model + 1) % (int64_t)size();
+            for (int64_t i = 0; i < (int64_t)size(); i++) {
+                int64_t m = (start + i) % (int64_t)size();
+                if (!at(m).hasFlag(MF_IGNORED + MF_WAITING + MF_RUNNING)) {
+                    next_model = m;
+                    break;
+                }
             }
         }
     }
-    if (next_model != current_model) {
+    if (next_model != -1) {
         current_model = next_model;
         at(next_model).setFlag(MF_RUNNING);
-    } else
-        next_model = -1;
+    }
     }
     return next_model;
 }
@@ -3428,8 +4301,235 @@ CandidateModel CandidateModelSet::evaluateAll(Params &params, PhyloTree* in_tree
     }
 
     int64_t num_models = size();
-#ifdef _OPENMP
-#pragma omp parallel num_threads(num_threads)
+
+#ifdef _IQTREE_MPI
+    // -----------------------------------------------------------------------
+    // FCA dispatch — Family-Local + Cost-Aware + Always-Filter
+    // -----------------------------------------------------------------------
+    // Replaces the previous round-robin LPT + rate_block recompute (Fix A/C).
+    //
+    // See setonix-iq/research/updated-modelfinder-dispatch.md for the full
+    // design. Summary:
+    //   1. closed-form cost predictor: nstates^2 * npat * rate * freq * log2(N)
+    //      — captures DNA(4)/AA(20)/codon(61) state-count, alignment size,
+    //      rate-variant cost (+Rk, +I+G, +G, +I), ML-frequency overhead (+F),
+    //      and tree-size BFGS scaling.
+    //   2. group by subst_name; greedy LPT (argmin rank_load) — NOT round-robin
+    //      — assigns whole substitution families (all rate variants together)
+    //      so filterRates pruning is fully effective within each rank.
+    //   3. per-rank state machine (mpi_ref_subst_idx, mpi_ref_remaining):
+    //      fires filterRates exactly once, when the rank's reference family
+    //      is fully evaluated. Replaces the fragile "model >= rate_block"
+    //      trigger which had an edge case at np=4.
+    //   4. Phase 0.5: cross-rank ok_rates broadcast via filterRatesMPI() so
+    //      ranks with flat-BIC ref families still benefit from rank 0's
+    //      sharp-BIC pruning (the Phase 0 regression root cause at np>=2).
+    //   5. Phase 0.6: getNextModel() ref-family priority so all ranks reach
+    //      the collective broadcast point close together (eliminates the
+    //      ~370 s rank-0 idle observed in Phase 0.5).
+    //   6. MF-MPI-DIAG: log lines per rank for offline analysis.
+    //
+    // Reset state members (members because getNextModel needs ref-family
+    // priority access; reset every call for MixtureFinder/PartitionFinder
+    // repeated-invocation safety).
+    mpi_ref_subst_idx          = -1;
+    mpi_ref_remaining          = 0;
+    mpi_filterRatesMPI_fired   = false;
+    mpi_filterRatesMPI_enabled = false;
+    mpi_warm_start.clear();  // Phase A.1 — reset cross-model rate-param cache
+                             // per evaluateAll() call (Partition / Mixture safety).
+
+    if (MPIHelper::getInstance().getNumProcesses() > 1) {
+        int my_rank = MPIHelper::getInstance().getProcessID();
+        int nranks  = MPIHelper::getInstance().getNumProcesses();
+        Alignment *aln_disp = in_tree->aln;
+        int    nstates = aln_disp->num_states;
+        int    npat    = (int)aln_disp->getNPattern();
+        int    ntaxa   = (int)aln_disp->getNSeq();
+        double tree_mult = (ntaxa > 1) ? log2((double)ntaxa) : 1.0;
+        double per_pat   = (double)nstates * (double)nstates * (double)npat * tree_mult;
+
+        // Step 1 — closed-form cost predictor (FCA).
+        auto modelCostFCA = [&](int idx) -> double {
+            const string &r = at(idx).orig_rate_name;
+            const string &s = at(idx).subst_name;
+            double rate_mult = 0.0;
+            for (const char *tag : {"+R", "*R", "+H", "*H", "+I+R", "+I*R"}) {
+                size_t p = r.find(tag);
+                if (p != string::npos && p + strlen(tag) < r.size()
+                    && isdigit((unsigned char)r[p + strlen(tag)])) {
+                    int k = atoi(r.c_str() + p + strlen(tag));
+                    if (k > 0) { rate_mult = (double)k * 1.5; break; }
+                }
+            }
+            if (rate_mult == 0.0) {
+                if (r.find("+I+G") != string::npos || r.find("+ASC+G") != string::npos)
+                    rate_mult = 5.0;
+                else if (r.find("+G") != string::npos) rate_mult = 4.0;
+                else if (r.find("+I") != string::npos) rate_mult = 2.0;
+                else rate_mult = 1.0;
+            }
+            // +F (ML frequencies) costs ~3x more BFGS iterations than empirical
+            // (+FC/+FQ/+FU) or fixed (+F{...}). Detect bare "+F" only — the
+            // suffix must be end-of-string or '+' (start of next tag).
+            double freq_mult = 1.0;
+            size_t fp = s.find("+F");
+            if (fp != string::npos) {
+                size_t after = fp + 2;
+                if (after >= s.size() || s[after] == '+')
+                    freq_mult = 3.0;
+            }
+            return per_pat * rate_mult * freq_mult;
+        };
+
+        // Step 2 — group models by subst_name in generate() order.
+        vector<string>      group_order;
+        map<string, double> group_cost;
+        map<string, int>    group_first_idx;
+        for (int i = 0; i < (int)num_models; i++) {
+            const string &sn = at(i).subst_name;
+            auto it = group_cost.find(sn);
+            if (it == group_cost.end()) {
+                group_order.push_back(sn);
+                group_cost[sn] = 0.0;
+                group_first_idx[sn] = i;
+            }
+            group_cost[sn] += modelCostFCA(i);
+        }
+
+        // Step 3 — greedy LPT: sort groups by descending total cost (stable,
+        // with generate-order as tie-break). Assign each group to the least-
+        // loaded rank (argmin); ties broken by lowest rank id.
+        stable_sort(group_order.begin(), group_order.end(),
+                    [&](const string &a, const string &b){
+                        if (group_cost[a] != group_cost[b])
+                            return group_cost[a] > group_cost[b];
+                        return group_first_idx[a] < group_first_idx[b];
+                    });
+        vector<double> rank_load(nranks, 0.0);
+        map<string, int> group_rank;
+        for (const string &g : group_order) {
+            int best_rank = 0;
+            for (int r = 1; r < nranks; r++)
+                if (rank_load[r] < rank_load[best_rank]) best_rank = r;
+            group_rank[g] = best_rank;
+            rank_load[best_rank] += group_cost[g];
+        }
+
+        // Step 4 — mark cross-rank MF_IGNORED; clear MF_WAITING on own models.
+        int    my_count = 0;
+        double my_cost  = 0.0;
+        for (int i = 0; i < (int)num_models; i++) {
+            if (group_rank[at(i).subst_name] != my_rank) {
+                at(i).setFlag(MF_IGNORED);
+            } else {
+                at(i).resetFlag(MF_WAITING);
+                my_count++;
+                my_cost += modelCostFCA(i);
+            }
+        }
+
+        // Step 5 — set up per-rank reference-family completion state machine.
+        for (int i = 0; i < (int)num_models; i++) {
+            if (!at(i).hasFlag(MF_IGNORED)) {
+                mpi_ref_subst_idx = i;
+                break;
+            }
+        }
+        if (mpi_ref_subst_idx >= 0 && auto_rate) {
+            const string &ref = at(mpi_ref_subst_idx).subst_name;
+            for (int i = 0; i < (int)num_models; i++)
+                if (at(i).subst_name == ref && !at(i).hasFlag(MF_IGNORED))
+                    mpi_ref_remaining++;
+        }
+
+        // Step 6 — diagnostic log (one line per rank, for offline analysis).
+        int g_count = 0;
+        ostringstream group_summary;
+        for (const string &g : group_order)
+            if (group_rank[g] == my_rank) {
+                if (g_count++) group_summary << ",";
+                group_summary << g;
+            }
+        cout << "MF-MPI-DIAG: rank " << my_rank << "/" << nranks
+             << " owns " << g_count << " groups, " << my_count << "/"
+             << num_models << " models, projected_cost=" << my_cost
+             << " ref_subst="
+             << (mpi_ref_subst_idx >= 0 ? at(mpi_ref_subst_idx).subst_name : string("(none)"))
+             << " ref_remaining=" << mpi_ref_remaining
+             << " (FCA: subst-family greedy-LPT, ref-family state machine)"
+             << endl;
+        cout.flush();
+
+        // Step 7 — disable the legacy rate_block trigger. The state machine
+        // above will fire filterRatesMPI (or legacy filterRates fallback)
+        // exactly once when ref_remaining hits 0. Non-MPI builds and np=1 MPI
+        // fall through to the original "model >= rate_block" check unchanged.
+        rate_block = (int)num_models;
+
+        // Step 8 — Phase 0.5 gate: every rank must have a valid ref family
+        // AND auto_rate AND score_diff_thres >= 0 to participate in the
+        // collective MPI_Bcast inside filterRatesMPI. If any rank fails any
+        // condition, ALL ranks must skip the broadcast or MPI_Bcast deadlocks.
+        // Determine via MPI_Allreduce(MIN).
+        int my_ok = (mpi_ref_subst_idx >= 0 && auto_rate
+                     && Params::getInstance().score_diff_thres >= 0) ? 1 : 0;
+        int all_ok = 0;
+        MPI_Allreduce(&my_ok, &all_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+        mpi_filterRatesMPI_enabled = (all_ok == 1);
+        if (my_rank == 0)
+            cout << "MF-MPI-DIAG: filterRatesMPI_enabled=" << mpi_filterRatesMPI_enabled
+                 << " (my_ok=" << my_ok << " all_ok=" << all_ok << ")" << endl;
+        cout.flush();
+    }
+#endif
+
+    // OMP-across-models path — used by both MPI and non-MPI builds.
+    //
+    // Each OMP thread grabs one model via getNextModel() (work-stealing) and
+    // evaluates it.  Because nested OMP is off by default, inner omp_parallel
+    // regions inside evaluate() degrade to 1 thread, giving site-level
+    // parallelism at the cost of intra-model barriers.  With ~103 models
+    // running concurrently there are essentially no such barriers — each
+    // thread traverses its own model independently.
+    //
+    // For MPI builds Phase 1 (above) pre-assigned all rate variants for each
+    // substitution-model family to the same rank via MF_IGNORED marking.
+    // This ensures filterRates() pruning is fully effective within each
+    // rank's model set — cheaper rate variants (+G4) are evaluated first and
+    // prune expensive +Rk series early, matching standard IQ-TREE behaviour.
+    //
+    // Race-condition (Issue 5) — FIXED by Fix F:
+    // The shared model_info (in_model_info in evaluate()) is a std::map that is
+    // NOT thread-safe for concurrent read + write.  Before Fix F, several reads
+    // from in_model_info in evaluate() (restoreCheckpoint early-exit,
+    // restoreCheckpointRminus1, initFromCatMinusOne) happened outside any
+    // #pragma omp critical, racing with another thread's protected
+    // saveCheckpoint write at the end of evaluate().  Concurrent map::find +
+    // map::insert corrupt the red-black tree → heap corruption → SIGABRT.
+    //
+    // Fix G takes a per-thread snapshot (in_model_info = in_model_info) before
+    // iqtree->setCheckpoint(), so ALL checkpoint reads (restoreCheckpoint,
+    // initializeModel, getModelFactory()->restoreCheckpoint) use per-thread
+    // storage.  This is correct for both parallel (non-MPI) and sequential
+    // (MPI) outer-loop modes.
+    //
+    // Fix H restricts the parallel outer loop to non-MPI builds.  In MPI builds
+    // the outer loop is sequential: each rank evaluates its assigned models one
+    // at a time using num_threads OMP threads inside each evaluate() call.
+    // Parallel outer loop in MPI builds would require num_threads concurrent
+    // IQTree instances, each holding full partial-lh buffers (~12 GB for AA 100K
+    // on 100 taxa), causing OOM on 512 GB nodes.
+    {
+#if defined(_OPENMP) && !defined(_IQTREE_MPI)
+    // OMP parallel outer loop across models for non-MPI builds only.
+    // In MPI builds the outer loop is sequential: each rank evaluates its
+    // assigned models one at a time, using num_threads OMP threads inside each
+    // evaluate() call (for the partial-likelihood kernel).  Parallel outer loop
+    // in MPI builds would require num_threads concurrent IQTree instances each
+    // holding full partial-lh buffers (~12 GB for AA 100K), causing OOM.
+    // proc_bind(spread): distribute threads evenly across both NUMA domains.
+#pragma omp parallel num_threads(num_threads) proc_bind(spread)
 #endif
     {
     int64_t model;
@@ -3444,21 +4544,91 @@ CandidateModel CandidateModelSet::evaluateAll(Params &params, PhyloTree* in_tree
         ModelCheckpoint out_model_info;
         at(model).set_name = at(model).aln->name;
         string tree_string;
-        
-        // main call to estimate model parameters
+
+        // MF-TIME marker — per-model wall start (seconds since epoch, ms precision).
+        // Emitted on EVERY rank, EVERY model. Combined with the end marker below,
+        // this lets us reconstruct each rank's eval-loop timeline offline and see
+        // exactly when each rank reached the filterRatesMPI broadcast.
+        double _mf_t_start = 0.0;
+#ifdef _IQTREE_MPI
+        _mf_t_start = MPI_Wtime();
+#else
+        {
+            struct timeval _tv; gettimeofday(&_tv, nullptr);
+            _mf_t_start = _tv.tv_sec + _tv.tv_usec * 1e-6;
+        }
+#endif
+
+        // main call to estimate model parameters.
+        // GEMS: the FCA cross-model rate warm-start is excluded from this repo
+        // (it belongs to the FCA lineage, not the GPU ModelFinder). Passing
+        // nullptr keeps CPU ModelFinder result-identical to upstream IQ-TREE 3.1.2.
         tree_string = at(model).evaluate(params, model_info, out_model_info,
-                                         models_block, num_threads, brlen_type);
+                                         models_block, num_threads, brlen_type,
+                                         nullptr);
         at(model).computeICScores();
         at(model).setFlag(MF_DONE);
+
+        double _mf_t_end = 0.0;
+#ifdef _IQTREE_MPI
+        _mf_t_end = MPI_Wtime();
+#else
+        {
+            struct timeval _tv; gettimeofday(&_tv, nullptr);
+            _mf_t_end = _tv.tv_sec + _tv.tv_usec * 1e-6;
+        }
+#endif
+
+#ifdef _IQTREE_MPI
+        // MF-TIME line: one per model per rank. Production-safe (one line per
+        // model is far below stdout flush threshold). Parse via tools/parse_mf_time.py.
+        if (MPIHelper::getInstance().getNumProcesses() > 1) {
+            cout << "MF-TIME: rank " << MPIHelper::getInstance().getProcessID()
+                 << " model=" << model
+                 << " name=" << at(model).getName()
+                 << " subst=" << at(model).subst_name
+                 << " rate=" << at(model).orig_rate_name
+                 << " start=" << fixed << setprecision(3) << _mf_t_start
+                 << " end="   << fixed << setprecision(3) << _mf_t_end
+                 << " dt="    << fixed << setprecision(3) << (_mf_t_end - _mf_t_start)
+                 << " score=" << at(model).getScore()
+                 << " ref_remaining=" << mpi_ref_remaining
+                 << endl;
+            cout.flush();
+        }
+#endif
+        // Silence -Wunused-variable when both timing branches are dead in
+        // non-MPI builds (the gettimeofday path computes but doesn't use t_start/t_end).
+        (void)_mf_t_start; (void)_mf_t_end;
         
         int lower_model = getLowerKModel(model);
-        if (lower_model >= 0 && at(lower_model).getScore() < at(model).getScore()) {
+        // Phase 1 guard: skip pruning if the lower-k neighbour belongs to another
+        // MPI rank (MF_IGNORED). Without this, its score is 0 / uncomputed and the
+        // comparison produces incorrect +Rk skipping across the entire series.
+        if (lower_model >= 0
+            && !at(lower_model).hasFlag(MF_IGNORED)
+            && at(lower_model).getScore() < at(model).getScore()) {
             // ignore all +R_k model with higher category
             for (int higher_model = model; higher_model != -1;
                 higher_model = getHigherKModel(higher_model)) {
                 at(higher_model).setFlag(MF_IGNORED);
+#ifdef _IQTREE_MPI
+                // Counter-stall fix: intra-chain pruning silently discards
+                // higher-k ref-family models without going through the
+                // eval-and-decrement path, leaving mpi_ref_remaining
+                // stranded above 0. Decrement here for each pruned
+                // ref-family model except `model` itself (which is
+                // decremented in the omp critical section below).
+                // Atomic update is redundant at K_outer=1 (Fix H) but safe
+                // and forward-compatible with HH-NUMA Phase 2.
+                if (higher_model != (int)model
+                    && mpi_ref_subst_idx >= 0 && auto_rate
+                    && at(higher_model).subst_name == at(mpi_ref_subst_idx).subst_name) {
+#pragma omp atomic update
+                    mpi_ref_remaining--;
+                }
+#endif
             }
-            
         }
 #ifdef _OPENMP
 #pragma omp critical
@@ -3492,15 +4662,65 @@ CandidateModel CandidateModelSet::evaluateAll(Params &params, PhyloTree* in_tree
             cout << endl;
 
         }
+#ifdef _IQTREE_MPI
+        // FCA state-machine trigger (replaces "model >= rate_block" for MPI
+        // np>1 builds). Fires filterRatesMPI (Phase 0.5, MPI_Bcast) or legacy
+        // filterRates (fallback) exactly once when this rank's reference
+        // family is fully evaluated. See setonix-iq/research/
+        // updated-modelfinder-dispatch.md §§3.2, 19, 20 for rationale.
+        bool ratefilter_fired_by_fca = false;
+        if (mpi_ref_subst_idx >= 0 && auto_rate
+            && at(model).subst_name == at(mpi_ref_subst_idx).subst_name) {
+            mpi_ref_remaining--;
+            ASSERT(mpi_ref_remaining >= 0);
+            if (mpi_ref_remaining <= 0 && !mpi_filterRatesMPI_fired) {
+                // Mark fired BEFORE the (possibly collective) call so that
+                // any re-entry through getNextModel's ref-family priority
+                // path sees the correct gate state.
+                mpi_filterRatesMPI_fired = true;
+                if (mpi_filterRatesMPI_enabled) {
+                    // Phase 0.5 — collective MPI_Bcast of rank 0's ok_rates.
+                    // Every rank must reach this call or the Bcast deadlocks;
+                    // the Step-8 Allreduce gate guarantees this precondition.
+                    filterRatesMPI(model);
+                } else {
+                    // Fallback: legacy per-rank filterRates (under-prunes
+                    // on ranks 1+ but is deadlock-safe).
+                    filterRates(model);
+                }
+                ratefilter_fired_by_fca = true;
+                if (verbose_mode >= VB_MED)
+                    cout << "MF-MPI-DIAG: rank "
+                         << MPIHelper::getInstance().getProcessID()
+                         << " fca-trigger fired at model=" << model
+                         << " ref_subst=" << at(mpi_ref_subst_idx).subst_name
+                         << " best_score=" << best_score
+                         << " mpi_bcast=" << mpi_filterRatesMPI_enabled << endl;
+            }
+        }
+        if (!ratefilter_fired_by_fca && model >= rate_block)
+            filterRates(model); // auto filter rate models (legacy path)
+#else
         if (model >= rate_block)
             filterRates(model); // auto filter rate models
+#endif
         if (model >= subst_block)
             filterSubst(model); // auto filter substitution model
+#ifdef _IQTREE_MPI
+        // Save post-evaluation subst_name and rate_name so Phase 2 can propagate
+        // correct names (e.g. +G4 instead of +G) to ranks that did not evaluate
+        // this model.
+        if (MPIHelper::getInstance().getNumProcesses() > 1) {
+            model_info.put("mf_subst_" + convertIntToString(model), at(model).subst_name);
+            model_info.put("mf_rate_"  + convertIntToString(model), at(model).rate_name);
+        }
+#endif
 #ifdef _OPENMP
         }
 #endif
     } while (model != -1);
     }
+    } // end OMP-across-models path
     
     // store the best model
     ModelTestCriterion criteria[] = {MTC_AIC, MTC_AICC, MTC_BIC};
@@ -3526,6 +4746,89 @@ CandidateModel CandidateModelSet::evaluateAll(Params &params, PhyloTree* in_tree
     
     model_info.putBestModelList(model_list);
     model_info.dump();
+
+#ifdef _IQTREE_MPI
+    // Phase 2: gather per-rank scores into a single global picture via Allreduce,
+    // then merge checkpoints so rank 0 has the complete .model.gz.
+    if (MPIHelper::getInstance().getNumProcesses() > 1) {
+        int n = (int)num_models;
+        // Sentinels: uncomputed slots stay at extreme values so MPI_MIN / MPI_MAX
+        // never selects them over a real computed value.
+        vector<double> local_lnL(n, -DBL_MAX), local_BIC(n, DBL_MAX),
+                       local_AIC(n, DBL_MAX),  local_AICc(n, DBL_MAX);
+        for (int i = 0; i < n; i++)
+            if (at(i).hasFlag(MF_DONE)) {
+                local_lnL[i]  = at(i).logl;
+                local_BIC[i]  = at(i).BIC_score;
+                local_AIC[i]  = at(i).AIC_score;
+                local_AICc[i] = at(i).AICc_score;
+            }
+        vector<double> g_lnL(n), g_BIC(n), g_AIC(n), g_AICc(n);
+        // Each slot has exactly one real value (its owning rank); sentinels are beaten
+        // by any real score in the reduce.
+        MPI_Allreduce(local_lnL.data(),  g_lnL.data(),  n, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        MPI_Allreduce(local_BIC.data(),  g_BIC.data(),  n, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+        MPI_Allreduce(local_AIC.data(),  g_AIC.data(),  n, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+        MPI_Allreduce(local_AICc.data(), g_AICc.data(), n, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+        // Fill slots this rank did not evaluate so getBestModelID() works correctly
+        // on every rank with a complete 968-model picture.
+        for (int i = 0; i < n; i++)
+            if (!at(i).hasFlag(MF_DONE)) {
+                at(i).logl       = g_lnL[i];
+                at(i).BIC_score  = g_BIC[i];
+                at(i).AIC_score  = g_AIC[i];
+                at(i).AICc_score = g_AICc[i];
+                at(i).setFlag(MF_DONE);
+            }
+        // Merge per-rank checkpoint entries into rank 0's model_info.
+        // Workers already have setFileName("") so they never write to disk.
+        MPIHelper::getInstance().gatherCheckpoint(&model_info);
+        MPIHelper::getInstance().broadcastCheckpoint(&model_info);
+        // Restore post-evaluation model names from checkpoint for models this rank
+        // did not evaluate (they still have the pre-evaluation name, e.g. +G not +G4).
+        for (int i = 0; i < n; i++) {
+            if (!at(i).hasFlag(MF_DONE))
+                continue; // not gathered (should not happen after Allreduce)
+            string sname, rname;
+            if (model_info.getString("mf_subst_" + convertIntToString(i), sname))
+                at(i).subst_name = sname;
+            if (model_info.getString("mf_rate_"  + convertIntToString(i), rname))
+                at(i).rate_name  = rname;
+        }
+        // Fix pre-gather checkpoint corruption: the "store the best model" block above
+        // wrote best_model_AIC/AICc/BIC and best_score_* from each rank's local MF_DONE
+        // subset (only ~n/nranks models, on whichever starting tree that rank found).
+        // gatherCheckpoint() merges all ranks' checkpoint entries with last-write-wins
+        // semantics, so the highest-numbered rank's stale local-best name silently
+        // overwrites master's correct value (e.g. "SYM+I+R2" replaces "GTR+R4" for np4).
+        // Now that all n models have post-Allreduce globally-correct scores and
+        // post-evaluation names restored from checkpoint, re-write all criteria keys and
+        // rebuild the full model_list (replaces the rank-local partial list, e.g. 23 models
+        // for one rank's +I+R2 stripe vs the full 968-model view).
+        {
+            const ModelTestCriterion all_criteria[] = {MTC_AIC, MTC_AICC, MTC_BIC};
+            for (auto mtc : all_criteria) {
+                int bm = getBestModelID(mtc);
+                model_info.put("best_model_" + criterionName(mtc), at(bm).getName());
+                model_info.put("best_score_" + criterionName(mtc), at(bm).getScore(mtc));
+            }
+            // Rebuild model_list from all n gathered models sorted by active criterion score.
+            multimap<double,int> global_sorted;
+            for (int i = 0; i < n; i++)
+                global_sorted.insert(multimap<double,int>::value_type(at(i).getScore(), i));
+            string global_list;
+            for (auto it = global_sorted.begin(); it != global_sorted.end(); it++) {
+                if (it != global_sorted.begin()) global_list += " ";
+                global_list += at(it->second).getName();
+            }
+            model_info.putBestModelList(global_list);
+            // Re-dump to persist the corrected keys to .model.gz.
+            // Workers have setFileName("") so their dump() is a no-op.
+            model_info.dump();
+        }
+        cout << "MF-MPI: gather complete, " << n << " model scores consolidated" << endl;
+    }
+#endif
 
     // update alignment if best data type changed
     int best_model = getBestModelID(params.model_test_criterion);
@@ -6374,8 +7677,8 @@ CandidateModel findMixtureComponent(Params &params, IQTree &iqtree, ModelCheckpo
     
     uint64_t mem_size = iqtree.getMemoryRequiredThreaded(max_cats);
     cout << "NOTE: MixtureFinder " << n_class << "-class models requires " << (mem_size / 1024) / 1024 << " MB RAM!" << endl;
-    if (mem_size >= getMemorySize()) {
-        outError("Memory required exceeds your computer RAM size!");
+    if (mem_size >= getAvailableMemory()) {   // cgroup/job allocation, not just physical RAM
+        outError("Memory required exceeds your available RAM (cgroup/job allocation)!");
     }
 #ifdef BINARY32
     if (mem_size >= 2000000000) {

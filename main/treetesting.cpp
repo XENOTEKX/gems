@@ -1141,7 +1141,7 @@ void evaluateTrees(istream &in, Params &params, IQTree *tree, vector<TreeInfo> &
         ntrees*sizeof(TreeInfo) +
         params.do_weighted_test*(ntrees * nptn * sizeof(double) + ntrees*ntrees*sizeof(double));
         cout << "Note: " << ((double)mem_size/1024)/1024 << " MB of RAM required!" << endl;
-        if (mem_size > getMemorySize()-100000)
+        if (mem_size > getAvailableMemory()-100000)   // cgroup/job allocation, not just physical RAM
             outWarning("The required memory does not fit in RAM!");
         cout << "Creating " << params.topotest_replicates << " bootstrap replicates..." << endl;
         if (!(boot_samples = new int [params.topotest_replicates*nptn]))

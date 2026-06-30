@@ -17,3 +17,9 @@
 
 /* does the platform provide backtrace functions? */
 #cmakedefine Backtrace_FOUND
+
+/* build with in-tree CUDA GPU ModelFinder kernels (CMake option IQTREE_GPU) */
+#cmakedefine IQTREE_GPU
+
+/* compile in the dev-only GPU cross-checks (CMake option JOLT_DEBUG_BUILD; production = OFF) */
+#cmakedefine JOLT_DEBUG_BUILD

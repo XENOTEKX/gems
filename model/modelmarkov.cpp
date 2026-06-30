@@ -1015,6 +1015,31 @@ void ModelMarkov::scaleStateFreq(bool sum_one) {
 	}
 }
 
+// G.6 (GPU free-Q JOLT) — thin public wrappers over the protected (set/get)Variables. They go through the
+// VIRTUAL (set/get)Variables, so ModelDNA's param_spec rate-class mapping + gauge (G-T=1) are applied
+// automatically: one code path covers HKY..GTR and every equal/empirical-freq variant. The flat vector is
+// 0-indexed of length getNDim() (the optimiser's free dims); for fixed-freq models that is exactly the free
+// exchangeabilities. CPU-path-neutral (only reached under --gpu/--jolt).
+void ModelMarkov::gpuGetFreeParams(double *out) {
+	int nd = getNDim();
+	if (nd <= 0) return;
+	double *v = new double[nd+1]();
+	setVariables(v);                       // model -> v[1..nd]  (virtual: ModelDNA applies param_spec)
+	for (int i = 0; i < nd; i++) out[i] = v[i+1];
+	delete [] v;
+}
+
+void ModelMarkov::gpuSetFreeParamsDecompose(const double *in) {
+	int nd = getNDim();
+	if (nd <= 0) return;
+	double *v = new double[nd+1]();
+	setVariables(v);                       // seed all dims from the current model (we overwrite the free ones)
+	for (int i = 0; i < nd; i++) v[i+1] = in[i];
+	getVariables(v);                       // v -> model rates (+freqs if FREQ_ESTIMATE) via param_spec
+	decomposeRateMatrix();                 // re-eigendecompose from the new rates
+	delete [] v;
+}
+
 void ModelMarkov::setVariables(double *variables) {
 	int nrate = getNDim();
 

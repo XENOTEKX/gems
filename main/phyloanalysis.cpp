@@ -3451,7 +3451,15 @@ void startTreeReconstruction(Params &params, IQTree* &iqtree, ModelCheckpoint &m
     params.start_real_time = getRealTime();
     string best_subst_name, best_rate_name;
     map <string, vector<string> > nest_network;
-    runModelFinder(params, *iqtree, model_info, best_subst_name, best_rate_name, nest_network);
+    // Phase 4: native CTF (coarse-to-fine) ModelFinder. When --ctf is set,
+    // runCTFModelFinder() does the whole coarse-rank + top-k full-data refine in
+    // one process and leaves iqtree holding the winner (returns true). Otherwise
+    // fall back to the standard monolithic ModelFinder.
+    if (params.ctf && runCTFModelFinder(params, *iqtree, model_info, best_subst_name, best_rate_name, nest_network)) {
+        // CTF set the winner (iqtree now holds the winner's optimized tree+params)
+    } else {
+        runModelFinder(params, *iqtree, model_info, best_subst_name, best_rate_name, nest_network);
+    }
     
     runMixtureFinder(params, iqtree, model_info);
     
@@ -3614,11 +3622,38 @@ void runTreeReconstruction(Params &params, IQTree* &iqtree) {
     }
 
     if (!params.pll) {
-        uint64_t total_mem = getMemorySize();
+        // Honour the cgroup/PBS memory allocation, not just physical RAM: on a shared node
+        // (e.g. a 2 TB GPU node with a 180 GB job) getMemorySize() reports the physical 2 TB, so the
+        // auto-mem-save below would never trigger and IQ-TREE would over-allocate the O(nInternal*nptn)
+        // partial-lh arena and get cgroup-killed (the AA-10M --jolt OOM, job 170856902). Size to the
+        // real allocation so the existing, tested LM_MEM_SAVE path engages correctly.
+        uint64_t phys_mem  = getMemorySize();
+        uint64_t total_mem = getAvailableMemory();           // min(physical, cgroup/job limit)
+        if (total_mem < phys_mem)
+            cout << "NOTE: cgroup/job memory limit " << (total_mem / 1073741824.0) << " GB < physical "
+                 << (phys_mem / 1073741824.0) << " GB -> sizing likelihood memory to the allocation" << endl;
         if (params.lh_mem_save == LM_MEM_SAVE && params.max_mem_size > total_mem)
             params.max_mem_size = total_mem;
 
         uint64_t mem_required = iqtree->getMemoryRequired();
+
+        // --jolt: the GPU computes the likelihood, so IQ-TREE's host per-node partial-lh arena is needed
+        // only for the post-write-back coherence self-check (computeLikelihood, recompute-EXACT under
+        // mem-save). If the LM_PER_NODE arena would not comfortably fit the allocation, run the host in the
+        // lean LM_MEM_SAVE min-slots tier (max_lh_slots = log2(leafNum)+1) -> exact lnL, fits at any scale.
+        // We use the lean tier (max_mem_size=0), not the fractional one, because getMemoryRequired() omits
+        // G_matrix/theta_all/buffers (~22 GB at 10M) so the fractional slot count would still cgroup-kill.
+        if (params.jolt && !iqtree->isSuperTree() && params.lh_mem_save != LM_MEM_SAVE
+            && mem_required >= total_mem * 0.7) {
+            uint64_t per_node = mem_required;
+            params.lh_mem_save = LM_MEM_SAVE;
+            params.max_mem_size = 0.0;
+            mem_required = iqtree->getMemoryRequired();
+            cout << "NOTE: [--jolt] host LM_PER_NODE arena " << (per_node / 1073741824.0)
+                 << " GB exceeds 70% of the " << (total_mem / 1073741824.0)
+                 << " GB allocation -> host runs memory-saving (" << (mem_required / 1073741824.0)
+                 << " GB; the GPU does the likelihood, the host self-check recomputes exactly)" << endl;
+        }
 
         if (mem_required >= total_mem*0.95 && !iqtree->isSuperTree()) {
             // switch to memory saving mode
@@ -4858,10 +4893,10 @@ void computeSiteFrequencyModel(Params &params, Alignment *alignment) {
     if (!tree->getModel()->isMixture())
         outError("No mixture model was specified!");
     uint64_t mem_size = tree->getMemoryRequired();
-    uint64_t total_mem = getMemorySize();
+    uint64_t total_mem = getAvailableMemory();   // cgroup/job allocation, not just physical RAM
     cout << "NOTE: " << (mem_size / 1024) / 1024 << " MB RAM is required!" << endl;
     if (mem_size >= total_mem) {
-        outError("Memory required exceeds your computer RAM size!");
+        outError("Memory required exceeds your available RAM (cgroup/job allocation)!");
     }
 #ifdef BINARY32
     if (mem_size >= 2000000000) {

@@ -38,6 +38,7 @@
     #endif
 #endif
 #include <thread>
+#include <fstream>
 
 
 #if defined(Backtrace_FOUND)
@@ -58,6 +59,93 @@ extern void printCopyright(ostream &out);
 #if defined(WIN32)
 #include <sstream>
 #endif
+
+#if defined(__linux__)
+// Read one cgroup memory-limit file (v2 "memory.max" parses "max"=unlimited; v1 reads a uint).
+// Returns the value in bytes, or UINT64_MAX if absent / unlimited / unreadable.
+static uint64_t readCgroupLimitFile(const std::string &full, bool is_v2) {
+    std::ifstream mf(full.c_str());
+    if (!mf.is_open()) return UINT64_MAX;
+    if (is_v2) {
+        std::string val; mf >> val;
+        if (val.empty() || val == "max") return UINT64_MAX;
+        uint64_t x = strtoull(val.c_str(), nullptr, 10);
+        return (x > 0) ? x : UINT64_MAX;
+    } else {
+        uint64_t x = 0;
+        if (!(mf >> x) || x == 0) return UINT64_MAX;
+        return x;
+    }
+}
+// Walk `cgpath` and ALL its ancestors up to the root, reading `file` at each level under `base`,
+// and return the MINIMUM limit found. The kernel enforces the tightest limit anywhere on the path,
+// so a leaf scope that reads "unlimited" can still be capped by a parent slice (proven on Gadi login
+// nodes: session.scope=unlimited but the parent user-NNNN.slice=4 GB). A sentinel (>=1<<62) is "no limit".
+static uint64_t walkCgroupHierarchy(const std::string &base, std::string cgpath, const std::string &file, bool is_v2) {
+    uint64_t limit = UINT64_MAX;
+    for (;;) {
+        uint64_t x = readCgroupLimitFile(base + cgpath + "/" + file, is_v2);
+        if (x < (uint64_t(1) << 62) && x < limit) limit = x;   // ignore the "unlimited" sentinel
+        if (cgpath.empty()) break;                              // just read the root ("") -> done
+        size_t s = cgpath.find_last_of('/');
+        cgpath = (s == std::string::npos) ? std::string() : cgpath.substr(0, s);  // ascend one level
+    }
+    return limit;
+}
+#endif
+
+/**
+ * Read the calling process's EFFECTIVE cgroup memory limit (the PBS/Slurm/container/systemd-slice
+ * allocation), which can be far below the physical RAM that getMemorySize() reports on a shared node
+ * or a constrained desktop. Returns the limit in bytes, or UINT64_MAX if there is no limit / it cannot
+ * be determined. Supports cgroup v2 (memory.max) and v1 (memory.limit_in_bytes), and takes the MINIMUM
+ * over the whole cgroup hierarchy (the kernel enforces the tightest limit on the path -- a leaf that
+ * reads "unlimited" can be capped by a parent slice). Linux only; every failure path returns UINT64_MAX
+ * (never a small bogus value), so on unconstrained hardware this is a no-op (min(physical, MAX)=physical).
+ * Verified on Gadi PBS (cgroup v1): /proc/self/cgroup has "<n>:memory:/pbspro.service/jobid/<id>" and
+ * .../memory.limit_in_bytes is the requested -l mem (e.g. 42949672960 = 40 GB); and on a login node the
+ * parent user-NNNN.slice carries a 4 GB cap a leaf-only read would have missed.
+ */
+uint64_t getCgroupMemoryLimit() {
+#if defined(__linux__)
+    std::ifstream cg("/proc/self/cgroup");
+    if (!cg.is_open()) return UINT64_MAX;
+    std::string line, v2path, v1path;
+    bool have_v2 = false, have_v1 = false;
+    while (std::getline(cg, line)) {
+        // each line: "<hierarchy-id>:<controllers>:<path>"
+        size_t c1 = line.find(':');
+        if (c1 == std::string::npos) continue;
+        size_t c2 = line.find(':', c1 + 1);
+        if (c2 == std::string::npos) continue;
+        std::string controllers = line.substr(c1 + 1, c2 - c1 - 1);
+        std::string path = line.substr(c2 + 1);
+        if (controllers.empty()) { v2path = path; have_v2 = true; }          // "0::<path>" => cgroup v2
+        else if (("," + controllers + ",").find(",memory,") != std::string::npos) {  // exact token match
+            v1path = path; have_v1 = true;                                   // v1 memory controller
+        }
+    }
+    cg.close();
+    uint64_t limit = UINT64_MAX;
+    if (have_v2)                          limit = walkCgroupHierarchy("/sys/fs/cgroup",        v2path, "memory.max",           true);
+    if (limit == UINT64_MAX && have_v1)   limit = walkCgroupHierarchy("/sys/fs/cgroup/memory", v1path, "memory.limit_in_bytes", false);
+    return limit;
+#else
+    return UINT64_MAX;
+#endif
+}
+
+/**
+ * Effective available RAM for sizing likelihood memory: min(physical, cgroup/job limit).
+ * Use this (not getMemorySize()) anywhere IQ-TREE decides whether to switch to memory-saving mode or
+ * errors that "RAM is below requirement", so it honours a PBS/container/slice allocation rather than
+ * the (much larger) physical RAM of a shared node. On unconstrained hardware it equals getMemorySize().
+ */
+uint64_t getAvailableMemory() {
+    uint64_t phys = getMemorySize();
+    uint64_t cg   = getCgroupMemoryLimit();
+    return (cg < phys) ? cg : phys;
+}
 
 /********************************************************
         Miscellaneous
@@ -4586,6 +4674,16 @@ void parseArg(int argc, char *argv[], Params &params) {
                 continue;
             }
 
+            if (strcmp(argv[cnt], "--mpi-ranks-per-node") == 0) {
+                cnt++;
+                if (cnt >= argc)
+                    throw "Use --mpi-ranks-per-node <N>";
+                params.mpi_ranks_per_node = convert_int(argv[cnt]);
+                if (params.mpi_ranks_per_node < 1)
+                    throw "--mpi-ranks-per-node must be >= 1";
+                continue;
+            }
+
             if (strcmp(argv[cnt], "--weighted-perturbation") == 0 || strcmp(argv[cnt], "-weighted-perturbation") == 0) {
                 params.weightedPerturbation = true;
                 continue;
@@ -5442,6 +5540,204 @@ void parseArg(int argc, char *argv[], Params &params) {
             }
             if (strcmp(argv[cnt], "-mrbayes") == 0) {
                 params.mr_bayes_output = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--gpu") == 0 || strcmp(argv[cnt], "-gpu") == 0) {
+                params.gpu = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--jolt") == 0 || strcmp(argv[cnt], "-jolt") == 0) {
+                params.jolt = true;   // G.4.2: GPU JOLT joint-gradient optimiser (implies --gpu)
+                params.gpu = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ctf") == 0 || strcmp(argv[cnt], "-ctf") == 0) {
+                params.ctf = true;    // native coarse-to-fine ModelFinder (implies --jolt --gpu)
+                params.jolt = true;
+                params.gpu = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ctf-subsample") == 0) {
+                cnt++;
+                if (cnt >= argc)
+                    throw "Use --ctf-subsample <num_sites>";
+                params.ctf_subsample = convert_int(argv[cnt]);
+                if (params.ctf_subsample < 1)
+                    throw "--ctf-subsample must be positive";
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ctf-topk") == 0) {
+                cnt++;
+                if (cnt >= argc)
+                    throw "Use --ctf-topk <num_models>";
+                params.ctf_topk = convert_int(argv[cnt]);
+                if (params.ctf_topk < 1)
+                    throw "--ctf-topk must be positive";
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ctf-seed") == 0) {
+                cnt++;
+                if (cnt >= argc)
+                    throw "Use --ctf-seed <seed>";
+                params.ctf_seed = convert_int(argv[cnt]);
+                continue;
+            }
+            if (strcmp(argv[cnt], "--no-jolt") == 0 || strcmp(argv[cnt], "--cpu") == 0
+                || strcmp(argv[cnt], "--no-gpu") == 0) {
+                // Force the CPU path in a GPU-enabled build (A/B parity). Overrides the GPU default-on.
+                params.no_gpu = true;
+                params.gpu = false;
+                params.jolt = false;
+                params.ctf = false;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-diag") == 0) {
+                // TS.0 tree-search diagnostics: per-phase wall + counters (result-invariant; off by default)
+                params.ts_diag = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-reopt-split") == 0) {
+                // B6: per-NNI-move nni5-reopt-vs-screener stats (adds 1 extra LH eval/move; result-invariant)
+                params.ts_reopt_split = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--jolt-diag") == 0) {
+                // A3: price the optimizeParametersJOLT host-rebuild (H1 + per-eval echild tax) vs device.
+                params.jolt_diag = true;
+                setenv("JOLT_DIAG", "1", 1);   // gate the CUDA-TU echild timer (it cannot see Params)
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-screen-check") == 0) {
+                // TS.2-I1: cross-check GPU clean-room screener lnL vs CPU pre-reopt (needs the CPU oracle)
+                params.ts_screen_check = true;
+                params.ts_reopt_split = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-screen2-check") == 0) {
+                // TS.2-I2: cross-check the NON-MUTATING GPU screener vs CPU pre-reopt (needs the CPU oracle)
+                params.ts_screen2_check = true;
+                params.ts_reopt_split = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-screen3-check") == 0) {
+                // TS.2-I3a: cross-check the resident-postorder + re-pairing-fold screener vs the I2 oracle
+                params.ts_screen3_check = true;
+                params.ts_reopt_split = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-upper-check") == 0) {
+                // TS.2-I3b-i: persistent-upper preorder validator (every edge lnL == tree lnL). No CPU oracle needed.
+                params.ts_upper_check = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-batch-check") == 0) {
+                // TS.2-I3b-ii: batched re-pairing screener vs the 3a oracle + wall timing (the first perf number)
+                params.ts_batch_check = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-tile-check") == 0) {
+                // TS.2-I3c: pattern-tiled batched screener vs the 3a oracle + bit-identity to nTile=1 (AA-scale fit)
+                params.ts_tile_check = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-screen-drive") == 0) {
+                // TS.2 Integration Step 1: GPU screener as the NNI front-end, pure side-validator (byte-identical).
+                params.ts_screen_drive = true;
+                params.ts_reopt_split = true;   // so getBestNNIForBran populates preloglh for the per-round assertion
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-screen-topk") == 0) {
+                // TS.2 Integration Step 2: exact-refine only the top-k branches by GPU screener score
+                cnt++;
+                if (cnt >= argc) throw "Use --ts-screen-topk <k>";
+                params.ts_screen_topk = convert_int(argv[cnt]);
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-screen-adaptive") == 0) {
+                // TS.2 ADAPTIVE-K: phase-aware top-k from the screener's own scores (recovery-safe).
+                params.ts_screen_adaptive = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-adaptive-kmin") == 0) {
+                cnt++;
+                if (cnt >= argc) throw "Use --ts-adaptive-kmin <n>";
+                params.ts_adaptive_kmin = convert_int(argv[cnt]);
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-adaptive-kmax") == 0) {
+                cnt++;
+                if (cnt >= argc) throw "Use --ts-adaptive-kmax <n>";
+                params.ts_adaptive_kmax = convert_int(argv[cnt]);
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-adaptive-delta") == 0) {
+                cnt++;
+                if (cnt >= argc) throw "Use --ts-adaptive-delta <x>";
+                params.ts_adaptive_delta = convert_double(argv[cnt]);
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-jolt-allbr") == 0) {
+                // TS.1 (reborn / L1): lean in-loop JOLT all-branch reopt replaces the post-NNI CPU optimizeAllBranches(1).
+                params.ts_jolt_allbr = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-shadow") == 0) {
+                // TS.6 SHADOW (CPU falsification of FM-5): commit TS.6's old-length-select + global-reopt rule.
+                params.ts_shadow = true;
+                params.ts_reopt_split = true;     // so getBestNNIForBran populates preloglh (the select key)
+                setenv("TS_CLEAN_PRE", "1", 1);   // pristine old-length scores (de-contaminate cnt=1)
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-lbr-measure") == 0) {
+                // LBR G1 (read-only): rides the --ts-shadow-converge apply path to measure af + affected-vs-distance.
+                // IMPLIES ts_shadow + ts_shadow_converge so the instrument can't silently no-op if the user forgets
+                // them (red-team MINOR-6), and ts_reopt_split (getBestNNIForBran preloglh). The shadow per-round reopt
+                // = optimizeAllBranches(100) = the brlen-only CONVERGED stand-in for the GPU optimizeAllBranchesJOLT,
+                // which is ALSO brlen-only (brlenOnly=true => optAlpha=optPinv=nFreeQ=0, phylotreegpu.cpp:2030/2145 --
+                // VERIFIED; the proxy is faithful, red-team BLOCKER-1 that "JOLT co-optimizes alpha" is REFUTED).
+                params.ts_lbr_measure = true;
+                params.ts_shadow = true;
+                params.ts_shadow_converge = true;
+                params.ts_reopt_split = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-shadow-converge") == 0) {
+                // TS.6 SHADOW with a CONVERGED global reopt (optimizeAllBranches(100)) -> brackets JOLT's reopt strength.
+                params.ts_shadow = true;
+                params.ts_shadow_converge = true;
+                params.ts_reopt_split = true;
+                setenv("TS_CLEAN_PRE", "1", 1);
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-fused-check") == 0) {
+                // TS.6 FM-1 GATE (validation-only): prove enumerateNNIGeometry + the screener mi==cnt mapping per branch.
+                params.ts_fused_check = true;
+                params.ts_screen_drive = true;    // run the screener side-validator on EVERY branch (trajectory unchanged)
+                params.ts_reopt_split = true;     // getBestNNIForBran populates preloglh per cnt (the indexed compare)
+                setenv("TS_CLEAN_PRE", "1", 1);   // pristine per-cnt preloglh so g[cnt]==preloglh[cnt] is exact
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-fused") == 0) {
+                // TS.6 PRODUCTION fused apply (Increment 2): screener-positive select + ONE global JOLT reopt.
+                params.ts_fused = true;
+                params.ts_screen_adaptive = true; // adaptive-K selection over the screener
+                params.ts_jolt_allbr = true;      // the global JOLT reopt (TS.1 keystone)
+                params.ts_reopt_split = true;
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-fused-topm") == 0) {
+                // HYBRID knob: keep exact nni5 on the top-M screener branches (catch FM-5 late-bloomers), fuse the rest.
+                cnt++;
+                if (cnt >= argc) throw "Use --ts-fused-topm <num>";
+                params.ts_fused_nni5_topm = convert_int(argv[cnt]);
+                continue;
+            }
+            if (strcmp(argv[cnt], "--ts-subsample") == 0) {
+                // TS.9 coarse tree-search: run candidate-set init + the NNI loop on a seeded S-site subsample,
+                // then confirm/refine the best topology on the full alignment (the CTF analogue for tree search).
+                cnt++;
+                if (cnt >= argc) throw "Use --ts-subsample <num_sites>";
+                params.ts_subsample = convert_int(argv[cnt]);
                 continue;
             }
             if (argv[cnt][0] == '-') {
@@ -7365,6 +7661,7 @@ void Params::setDefault() {
     num_threads = 1;
     num_threads_max = 10000;
     openmp_by_model = false;
+    mpi_ranks_per_node = 1;
     model_test_criterion = MTC_BIC;
 //    model_test_stop_rule = MTC_ALL;
     model_test_sample_size = 0;
@@ -7382,7 +7679,11 @@ void Params::setDefault() {
     print_branch_lengths = false;
     lh_mem_save = LM_PER_NODE; // auto detect
     buffer_mem_save = false;
-    start_tree = STT_PLL_PARSIMONY;
+    // Default start tree: IQ-TREE's own parsimony (STT_PARSIMONY), not PLL. PLL builds the 98 candidate parsimony
+    // trees SERIALLY on one core with SPR refinement (sprDist=6); IQ-TREE's computeParsimonyTree runs them in parallel
+    // (OpenMP) with bit-packed Fitch and no SPR -> measured ~16x faster @100k, ~19x @1M (212.7s vs PLL 4032.96s),
+    // reaching the IDENTICAL final ML lnL (parsimony only seeds ML search). Was STT_PLL_PARSIMONY. (2026-06-28)
+    start_tree = STT_PARSIMONY;
     start_tree_subtype_name = StartTree::Factory::getNameOfDefaultTreeBuilder();
 
     modelfinder_ml_tree = true;
@@ -7544,6 +7845,36 @@ void Params::setDefault() {
     
     cmaple_use_local_ref = true;
     cmaple_output_MAT = false;
+    gpu = false;
+    jolt = false;
+    ctf = false;
+    ctf_subsample = 5000;
+    ctf_topk = 3;
+    ctf_seed = -1;
+    no_gpu = false;
+    ts_diag = false;
+    ts_reopt_split = false;
+    jolt_diag = false;
+    ts_screen_check = false;
+    ts_screen2_check = false;
+    ts_screen3_check = false;
+    ts_upper_check = false;
+    ts_batch_check = false;
+    ts_tile_check = false;
+    ts_screen_drive = false;
+    ts_screen_topk = 0;
+    ts_screen_adaptive = false;
+    ts_adaptive_kmin = 8;       // always refine at least the top-8 (settled-phase floor == flat topk8)
+    ts_adaptive_kmax = 0;       // 0 => all branches (full breadth allowed during recovery)
+    ts_adaptive_delta = 0.0;    // count strictly-improving swaps; >0 widens the net (safer for late-bloomers)
+    ts_jolt_allbr = false;      // TS.1: lean in-loop JOLT all-branch reopt for optallbranches; off = stock CPU sweep
+    ts_shadow = false;          // TS.6 SHADOW: CPU falsification of FM-5 (committed TS.6-rule counterfactual)
+    ts_shadow_converge = false; // TS.6 SHADOW with converged optimizeAllBranches(100) reopt bracket
+    ts_lbr_measure = false;     // LBR G1: read-only af/distance instrument riding the --ts-shadow apply path
+    ts_fused = false;           // TS.6 production fused apply (screener-positive + global JOLT reopt)
+    ts_fused_check = false;     // TS.6 FM-1 gate: validation-only geometry + mi==cnt mapping check
+    ts_fused_nni5_topm = 0;     // TS.6 hybrid: nni5 on top-M screener branches (0 = pure fused)
+    ts_subsample = 0;           // TS.9 coarse tree-search site-subsample (0 = off => byte-identical)
 }
 
 int countPhysicalCPUCores() {

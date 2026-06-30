@@ -449,6 +449,13 @@ public:
      */
     void evaluateNNIs(Branches &nniBranches, vector<NNIMove> &outNNIMoves);
 
+#ifdef IQTREE_GPU
+    /** TS.2 Integration: GPU-screener-driven NNI front-end (--ts-screen-drive Step 1 / --ts-screen-topk Step 2).
+        Step 1 is a pure side-validator (CPU order preserved, ranking discarded => byte-identical). Defined in
+        tree/iqtree.cpp under #ifdef IQTREE_GPU. */
+    void evaluateNNIsScreened(Branches &nniBranches, vector<NNIMove> &outNNIMoves);
+#endif
+
     // double optimizeNNIBranches(Branches &nniBranches);
 
     /**

@@ -297,6 +297,25 @@ else()
 endif()
 
 ##################################################################
+# build optional in-tree CUDA GPU ModelFinder kernels (Phase G.1+)
+##################################################################
+# Declared BEFORE configure_file() so the #cmakedefine IQTREE_GPU in
+# iqtree_config.h.in is substituted from this cache variable. OFF by default,
+# so a CPU-only build is unaffected (no CUDA language, no .cu sources, no link).
+option(IQTREE_GPU "Build in-tree CUDA GPU ModelFinder kernels" OFF)
+# Dev-only: compile in the one-shot GPU vs CPU clean-room cross-checks (lnL / derivative / mixture / free-Q).
+# OFF for production GPU builds (the checks are validation scaffolding, already runtime-off under --jolt).
+option(JOLT_DEBUG_BUILD "Compile the GPU dev cross-checks (requires IQTREE_GPU)" OFF)
+if (IQTREE_GPU)
+    message("Build CUDA GPU kernels: ON")
+    if (JOLT_DEBUG_BUILD)
+        message("JOLT_DEBUG_BUILD=ON: GPU dev cross-checks compiled in")
+    endif()
+else()
+    message("Build CUDA GPU kernels: OFF")
+endif()
+
+##################################################################
 # Detect target platforms
 ##################################################################
 if (WIN32)
@@ -331,7 +350,14 @@ elseif (UNIX)
     if (NOT IQTREE_FLAGS MATCHES "static")
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -rdynamic")
     else()
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+        if (IQTREE_GPU)
+            # The CUDA runtime (cudart) cannot be fully static-linked with -static;
+            # keep dynamic linking when GPU kernels are built. Unaffected when OFF.
+            message("IQTREE_GPU=ON: using -rdynamic (cudart cannot be fully -static linked)")
+            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -rdynamic")
+        else()
+            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+        endif()
     endif()
 else()
     # Note that IQ-TREE has NOT been tested on other platforms
@@ -725,6 +751,9 @@ elseif (CLANG)
     set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mfma")
 elseif (GCC)
     set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mfma")
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "IntelLLVM")
+    # icpx (Intel oneAPI DPC++) is Clang-based; use -mavx* flags, not -xMIC-AVX512
+    set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mfma")
 elseif (ICC)
     if (WIN32)
          set(AVX512_FLAGS "${AVX512_FLAGS} /QxMIC-AVX512")
@@ -907,6 +936,35 @@ if (NOT BINARY32 AND NOT IQTREE_FLAGS MATCHES "novx")
     endif()
 endif()
 
+# Optional in-tree CUDA GPU kernels — mirror the per-ISA kernel libs above, but
+# kept in a SEPARATE static lib so nvcc only ever touches GPU (.cu) sources and
+# the CPU build is byte-for-byte unaffected when IQTREE_GPU is OFF.
+if (IQTREE_GPU)
+    # CUDA_ARCHITECTURES (policy CMP0104) needs CMake >= 3.18; Gadi configures
+    # with cmake/3.24. Set the policy + default arch list BEFORE enable_language(CUDA)
+    # so the project's cmake_minimum_required(3.5) does not pin it to OLD behaviour.
+    if (POLICY CMP0104)
+        cmake_policy(SET CMP0104 NEW)
+    endif()
+    if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "70;80;90")  # V100 ; A100 ; H100
+    endif()
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)   # provides the CUDA::cudart imported target
+    message("CUDA compiler : ${CMAKE_CUDA_COMPILER}")
+    message("CUDA arch     : ${CMAKE_CUDA_ARCHITECTURES}")
+    add_library(iqtree_gpu STATIC tree/gpu/gpu_diag.cu tree/gpu/gpu_lnl_intree.cu)
+    set_target_properties(iqtree_gpu PROPERTIES
+        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+        POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(iqtree_gpu PRIVATE
+        "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}")
+    # Explicitly link the CUDA runtime PUBLIC so it propagates to iqtree3 (which
+    # links this static lib), instead of relying on CMake's implicit propagation
+    # across the static-lib boundary.
+    target_link_libraries(iqtree_gpu PUBLIC CUDA::cudart)
+endif()
+
 add_subdirectory(main)
 
 ##################################################################
@@ -1018,6 +1076,11 @@ endif()
 # basic linking librararies
 target_link_libraries(iqtree3 pll ncl nclextra utils pda lbfgsb whtest sprng vectorclass model
     gsl alignment tree simulator terrace yaml-cpp phyloYAML main ${TARGET_CMAPLE} ${PLATFORM_LIB} ${STD_LIB} ${THREAD_LIB} ${ATOMIC_LIB})
+
+# link the optional in-tree CUDA GPU kernels (Phase G.1+)
+if (IQTREE_GPU)
+    target_link_libraries(iqtree3 iqtree_gpu)
+endif()
 
 # Link the bundled LLVM libomp.a even for GCC builds
 # dl is needed by libomp on Linux for dlsym

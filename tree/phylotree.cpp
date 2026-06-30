@@ -20,6 +20,7 @@
  *   59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.             *
  ***************************************************************************/
 #include "phylotree.h"
+#include <iqtree_config.h>   // IQTREE_GPU (Phase G.2.0a cross-check hook guard)
 #include "utils/starttree.h"
 #include "utils/progress.h"  //for progress_display
 //#include "rateheterogeneity.h"
@@ -33,6 +34,7 @@
 #include "phylosupertreeplen.h"
 #include "upperbounds.h"
 #include "utils/MPIHelper.h"
+#include <sys/mman.h>   // madvise / MADV_HUGEPAGE (THP for central_partial_lh)
 #include "utils/hammingdistance.h"
 #include "model/modelmixture.h"
 #include "phylonodemixlen.h"
@@ -108,6 +110,9 @@ void PhyloTree::init() {
     dist_matrix = nullptr;
     var_matrix = nullptr;
     params = nullptr;
+    cpuComputeLikelihoodBranchPointer = nullptr;       // G.2.0b: saved CPU Branch ptr (set by setLikelihoodKernelGPU); inert when GPU off
+    cpuComputeLikelihoodDervPointer = nullptr;         // G.2.1b: saved CPU Derv ptr
+    cpuComputeLikelihoodFromBufferPointer = nullptr;   // G.2.1b: saved CPU FromBuffer ptr
     setLikelihoodKernel(LK_SSE2);  // FOR TUNG: you forgot to initialize this variable!
     setNumThreads(1);
     num_threads = 0;
@@ -133,6 +138,21 @@ void PhyloTree::init() {
     current_scaling = 1.0;
     is_opt_scaling = false;
     num_partial_lh_computations = 0;
+    tsd_t_perturb = tsd_t_nnisearch = tsd_t_evalnni = tsd_t_optallbr = tsd_t_optmodel = tsd_t_mpi = tsd_t_initcand = 0.0;
+    tsd_n_iter = tsd_n_branches_eval = tsd_n_positive = tsd_n_applied = tsd_n_derv = 0;
+    tsr_n_moves = tsr_sign_agree = tsr_false_neg = tsr_false_pos = tsr_argmax_agree = tsr_argmax_calls = 0;
+    tsr_gain_sum = tsr_gain_abs_sum = 0.0;
+    tsr_gain_max = -DBL_MAX;   // so an all-negative max is reported honestly (printed as 0 only when n==0)
+    tsk_applied = tsk_applied_prepos = tsk_rounds = 0;
+    for (int _k = 0; _k < 6; _k++) tsk_recall[_k] = 0;
+    tsc_n = tsc_elig = tsc_pass = 0; tsc_max_rel = 0.0;
+    tsc2_n = tsc2_elig = tsc2_pass = 0; tsc2_max_rel = 0.0;
+    tsc2_vs_gpu_n = tsc2_vs_gpu_pass = tsc2_vs_gpu_bitexact = 0; tsc2_vs_gpu_max_rel = 0.0;
+    tsc3_n = tsc3_elig = tsc3_pass = tsc3_bitexact = 0; tsc3_max_rel = 0.0;
+    tsu_done = false;
+    tsb_done = false;
+    tst_done = false;
+    tsdrv_rounds = tsdrv_fallback = tsdrv_branch = tsdrv_pass = 0; tsdrv_max_rel = 0.0; tsdrv_wall = 0.0;
     vector_size = 0;
     safe_numeric = false;
     summary = nullptr;
@@ -1119,6 +1139,13 @@ void PhyloTree::initializeAllPartialLh(int &index, int &indexlh, PhyloNode *node
             }
             if (!central_partial_lh)
                 outError("Not enough memory for partial likelihood vectors");
+#ifdef __linux__
+            // Promote central_partial_lh to 2 MB transparent huge pages.
+            // Reduces TLB misses on the partial_lh sweep: ~1.57M 4 KB PTEs
+            // (AA 1M) → 3,135 2 MB PTEs — fits in STLB. Gain: 8-15% MF wall
+            // on AA 1M+ (DRAM-bandwidth + TLB-bound workload). Patch 0004.
+            madvise(central_partial_lh, mem_size * sizeof(double), MADV_HUGEPAGE);
+#endif
         }
 
         // now always assign tip_partial_lh
@@ -2555,6 +2582,7 @@ double PhyloTree::computeFunction(double value) {
 void PhyloTree::computeFuncDerv(double value, double &df, double &ddf) {
     current_it->length = value;
     current_it_back->length = value;
+    if (params && params->ts_diag) tsd_n_derv++;
     computeLikelihoodDerv(current_it, (PhyloNode*) current_it_back->node, &df, &ddf);
 
     df = -df;
@@ -4173,6 +4201,36 @@ void PhyloTree::changeNNIBrans(NNIMove &nnimove) {
     }
 }
 
+// TS.6: geometry-only NNI enumeration — the lifted prefix of getBestNNIForBran (orient + FOR_NEIGHBOR_IT), with NO
+// reopt, NO partial-LH allocation, NO likelihood. Produces the SAME 2 moves (node1Nei_it/node2Nei_it) in the SAME
+// order as getBestNNIForBran's fresh-enumeration branch (phylotree.cpp:4303-4322), so out[cnt] == nniMoves[cnt] and
+// (on the eligible reversible path with direction force-synced) the screener's g0/g1 == cnt0/cnt1. --ts-fused-check
+// proves both per branch before the fused apply is trusted.
+void PhyloTree::enumerateNNIGeometry(PhyloNode *node1, PhyloNode *node2, NNIMove out[2]) {
+    ASSERT(!node1->isLeaf() && !node2->isLeaf());
+    ASSERT(node1->degree() == 3 && node2->degree() == 3);
+    // orient node1 to the non-TOWARD_ROOT (rootward) side — identical to getBestNNIForBran (:4209)
+    if (((PhyloNeighbor*)node1->findNeighbor(node2))->direction == TOWARD_ROOT) {
+        PhyloNode *tmp = node1; node1 = node2; node2 = tmp;
+    }
+    int cnt = 0;
+    FOR_NEIGHBOR_IT(node1, node2, node1_it)
+        if (((PhyloNeighbor*)*node1_it)->direction != TOWARD_ROOT) {
+            cnt = 0;
+            FOR_NEIGHBOR_IT(node2, node1, node2_it) {
+                out[cnt].node1Nei_it = node1_it;
+                out[cnt].node2Nei_it = node2_it;
+                cnt++;
+            }
+            break;
+        }
+    ASSERT(cnt == 2);
+    out[0].node1 = out[1].node1 = node1;
+    out[0].node2 = out[1].node2 = node2;
+    out[0].newloglh = out[1].newloglh = -DBL_MAX;
+    out[0].preloglh = out[1].preloglh = -DBL_MAX;
+}
+
 NNIMove PhyloTree::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2, NNIMove* nniMoves) {
 
     ASSERT(!node1->isLeaf() && !node2->isLeaf());
@@ -4293,11 +4351,35 @@ NNIMove PhyloTree::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2, NNIMove
     nniMoves[0].node1 = nniMoves[1].node1 = node1;
     nniMoves[0].node2 = nniMoves[1].node2 = node2;
     nniMoves[0].newloglh = nniMoves[1].newloglh = -DBL_MAX;
+    nniMoves[0].preloglh = nniMoves[1].preloglh = -DBL_MAX;   // --ts-reopt-split screener score (unset by default)
 
     double backupScore = curScore;
+    double tsr_pre[2] = {-DBL_MAX, -DBL_MAX};   // --ts-reopt-split: pre-reopt screener score per candidate
 
-    for (cnt = 0; cnt < 2; cnt++) if (constraintTree.isCompatible(nniMoves[cnt])) 
+    // VALIDATION-ONLY (TS_CLEAN_PRE): default IQ-TREE restores the reoptimised neighbourhood branch lengths only
+    // AFTER both moves (line ~4514), so cnt=1's preloglh is scored on cnt=0's nni5-REOPT-mutated lengths (contaminated).
+    // The GPU screener scores both moves on the PRISTINE snapshot. To validate GPU==clean-CPU, save the originals and
+    // restore them at the top of each cnt. Pure diagnostic; never on in the search itself.
+    bool ts_clean_pre = (getenv("TS_CLEAN_PRE") != nullptr);
+    std::vector<std::pair<PhyloNeighbor*,double> > tsCleanLens;
+    if (ts_clean_pre) {
+        tsCleanLens.push_back(std::make_pair(node12_it, node12_it->length));
+        tsCleanLens.push_back(std::make_pair(node21_it, node21_it->length));
+        FOR_NEIGHBOR_IT(node1, node2, it_c) {
+            tsCleanLens.push_back(std::make_pair((PhyloNeighbor*)*it_c, (*it_c)->length));
+            PhyloNeighbor *bk = (PhyloNeighbor*)(*it_c)->node->findNeighbor(node1);
+            tsCleanLens.push_back(std::make_pair(bk, bk->length));
+        }
+        FOR_NEIGHBOR_IT(node2, node1, it_c) {
+            tsCleanLens.push_back(std::make_pair((PhyloNeighbor*)*it_c, (*it_c)->length));
+            PhyloNeighbor *bk = (PhyloNeighbor*)(*it_c)->node->findNeighbor(node2);
+            tsCleanLens.push_back(std::make_pair(bk, bk->length));
+        }
+    }
+
+    for (cnt = 0; cnt < 2; cnt++) if (constraintTree.isCompatible(nniMoves[cnt]))
     {
+        if (ts_clean_pre) for (size_t i = 0; i < tsCleanLens.size(); i++) tsCleanLens[i].first->length = tsCleanLens[i].second;
         // do the NNI swap
         NeighborVec::iterator node1_it = nniMoves[cnt].node1Nei_it;
         NeighborVec::iterator node2_it = nniMoves[cnt].node2Nei_it;
@@ -4307,6 +4389,31 @@ NNIMove PhyloTree::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2, NNIMove
         // reorient partial_lh before swap
         reorientPartialLh(node12_it, node1);
         reorientPartialLh(node21_it, node2);
+
+#ifdef IQTREE_GPU
+        // TS.2 Increment 2/3a: NON-MUTATING screeners on the still-UNMUTATED tree, BEFORE the physical swap below
+        // (both stateless — build their own arrays, no partial_lh/length writes). g2 = the I2 swap-aware oracle
+        // (descriptor re-pointing), needed by both checks. g3 = the I3a resident-postorder + re-pairing fold; it is
+        // compared to g2 DIRECTLY here (self-contained). I2's g2-vs-CPU comparison happens post-swap (needs tsr_pre).
+        double g2_pre = (double)NAN;
+        double g3_pre = (double)NAN;
+        if (params->ts_screen2_check || params->ts_screen3_check) {
+            double g2ddf = 0.0;
+            gpuScreenNNICleanRoom(node1, node2, (PhyloNeighbor*)node1_nei, (PhyloNeighbor*)node2_nei, &g2ddf, &g2_pre);
+        }
+        if (params->ts_screen3_check) {
+            double g3ddf = 0.0;
+            gpuScreenNNIFoldCleanRoom(node1, node2, (PhyloNeighbor*)node1_nei, (PhyloNeighbor*)node2_nei, &g3ddf, &g3_pre);
+            tsc3_n++;
+            if (g3_pre == g3_pre && g2_pre == g2_pre) {   // both GPU-eligible (non-NaN)
+                tsc3_elig++;
+                double rel = (g2_pre != 0.0) ? fabs((g3_pre - g2_pre) / g2_pre) : fabs(g3_pre - g2_pre);
+                if (rel > tsc3_max_rel) tsc3_max_rel = rel;
+                if (rel <= 1e-9) tsc3_pass++;
+                if (g3_pre == g2_pre) tsc3_bitexact++;   // exact iff fold/child order coincides (benign if not)
+            }
+        }
+#endif
 
         node1->updateNeighbor(node1_it, node2_nei);
         node2_nei->node->updateNeighbor(node2, node1);
@@ -4321,6 +4428,60 @@ NNIMove PhyloTree::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2, NNIMove
         }
 
         int nni5_num_eval = max(params->nni5_num_eval, getMixlen());
+
+        // --ts-reopt-split (B6): score the swapped topology at the OLD branch lengths (the "screener"
+        // proxy), BEFORE any nni5 reopt. An NNI only dirties the two central directed partials, so we
+        // clear+recompute just those and evaluate the central branch. computeLikelihoodBranch is a pure
+        // read (no length write, no theta_computed set), and the normal path below re-clears
+        // node12_it/node21_it and the reopt overwrites theta before line ~4381 => result-invariant.
+        // Skipped under LM_MEM_SAVE: the extra traversal can reorder mem-slot eviction and hence FP
+        // summation order (numerically equivalent, but not guaranteed byte-identical). B6 diagnostic
+        // runs are never -mem-capped, so this costs nothing; it keeps the flag provably invariant.
+        if (params->ts_reopt_split && params->lh_mem_save != LM_MEM_SAVE) {
+            node12_it->clearPartialLh();
+            node21_it->clearPartialLh();
+            tsr_pre[cnt] = computeLikelihoodBranch(node12_it, node1);
+        }
+
+#ifdef IQTREE_GPU
+        // TS.2 Increment 1 (--ts-screen-check): in-situ GPU clean-room lnL of THIS swapped topology @ OLD
+        // lengths (swap already applied) vs the CPU oracle tsr_pre[cnt]. TS.2 Increment 2 (--ts-screen2-check):
+        // the NON-MUTATING virtual screener g2_pre (computed PRE-swap above) vs tsr_pre[cnt] (the gate) AND vs
+        // the in-situ helper glnL (same descriptors => expect BIT-EXACT; isolates an encoding bug from a
+        // shared GPU-path bug). gpuComputeEdgeDervCleanRoom is STATELESS; NaN = GPU-ineligible (+I / mixture /
+        // non-rev / ns∉{4,20}) -> excluded.
+        if ((params->ts_screen_check || params->ts_screen2_check) && tsr_pre[cnt] > -DBL_MAX) {
+            double gddf = 0.0, glnL = (double)NAN;
+            gpuComputeEdgeDervCleanRoom(node12_it, node1, &gddf, &glnL);
+            if (params->ts_screen_check) {
+                tsc_n++;
+                if (glnL == glnL) {   // not NaN
+                    tsc_elig++;
+                    double rel = (tsr_pre[cnt] != 0.0) ? fabs((glnL - tsr_pre[cnt]) / tsr_pre[cnt])
+                                                       : fabs(glnL - tsr_pre[cnt]);
+                    if (rel > tsc_max_rel) tsc_max_rel = rel;
+                    if (rel <= 1e-9) tsc_pass++;
+                }
+            }
+            if (params->ts_screen2_check) {
+                tsc2_n++;
+                if (g2_pre == g2_pre) {   // virtual screener not NaN
+                    tsc2_elig++;
+                    double rel = (tsr_pre[cnt] != 0.0) ? fabs((g2_pre - tsr_pre[cnt]) / tsr_pre[cnt])
+                                                       : fabs(g2_pre - tsr_pre[cnt]);
+                    if (rel > tsc2_max_rel) tsc2_max_rel = rel;
+                    if (rel <= 1e-9) tsc2_pass++;
+                    if (glnL == glnL) {   // in-situ helper also eligible -> rel<=1e-9 (robust) + bitexact (info)
+                        tsc2_vs_gpu_n++;
+                        double reld = (glnL != 0.0) ? fabs((g2_pre - glnL) / glnL) : fabs(g2_pre - glnL);
+                        if (reld <= 1e-9) tsc2_vs_gpu_pass++;
+                        if (g2_pre == glnL) tsc2_vs_gpu_bitexact++;   // exact iff descriptor child-order coincides
+                        if (reld > tsc2_vs_gpu_max_rel) tsc2_vs_gpu_max_rel = reld;
+                    }
+                }
+            }
+        }
+#endif
 
         for (int step = 0; step < nni5_num_eval; step++) {
 
@@ -4367,6 +4528,20 @@ NNIMove PhyloTree::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2, NNIMove
         if (verbose_mode >= VB_DEBUG)
             cout << "NNI " << node1->id << " - " << node2->id << ": " << score << endl;
         nniMoves[cnt].newloglh = score;
+        // --ts-reopt-split (B6): compare screener proxy (pre) vs post-reopt (post) vs current (cur)
+        if (params->ts_reopt_split && tsr_pre[cnt] > -DBL_MAX) {   // pre skipped under LM_MEM_SAVE => exclude
+            double pre = tsr_pre[cnt], post = score, cur = backupScore;
+            nniMoves[cnt].preloglh = pre;   // carried out via the returned best move for recall@k accounting
+            double gain = post - pre;
+            tsr_n_moves++;
+            tsr_gain_sum += gain;
+            tsr_gain_abs_sum += fabs(gain);
+            if (gain > tsr_gain_max) tsr_gain_max = gain;
+            bool preUp = (pre > cur), postUp = (post > cur);
+            if (preUp == postUp) tsr_sign_agree++;
+            if (!preUp && postUp) tsr_false_neg++;   // screener would DROP an accepted move (recall killer)
+            if (preUp && !postUp) tsr_false_pos++;   // screener would KEEP a rejected move
+        }
         // compute the pattern likelihoods if wanted
         if (nniMoves[cnt].ptnlh)
             computePatternLikelihood(nniMoves[cnt].ptnlh, &score);
@@ -4415,6 +4590,14 @@ NNIMove PhyloTree::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2, NNIMove
 
      // restore curScore
      curScore = backupScore;
+
+     // --ts-reopt-split (B6): per-call argmax agreement (does best-by-pre pick the same NNI as best-by-post?)
+     if (params->ts_reopt_split && tsr_pre[0] > -DBL_MAX && tsr_pre[1] > -DBL_MAX) {
+         tsr_argmax_calls++;
+         bool preArgIs0  = (tsr_pre[0]           >= tsr_pre[1]);
+         bool postArgIs0 = (nniMoves[0].newloglh >= nniMoves[1].newloglh);
+         if (preArgIs0 == postArgIs0) tsr_argmax_agree++;
+     }
 
      NNIMove res;
      if (nniMoves[0].newloglh > nniMoves[1].newloglh) {

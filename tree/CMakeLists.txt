@@ -41,6 +41,7 @@ phylosupertreeplen.h
 phylosupertreeunlinked.cpp
 phylosupertreeunlinked.h
 phylotree.cpp
+phylotreegpu.cpp
 phylotree.h
 phylotreemixlen.cpp
 phylotreemixlen.h

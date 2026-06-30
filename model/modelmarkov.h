@@ -254,10 +254,15 @@ public:
     virtual void adaptStateFrequency(double *state_freq);
 
 	/**
-	 * compute Q matrix 
+	 * compute Q matrix
 	 * @param q_mat (OUT) Q matrix, assuming of size num_states * num_states
 	 */
 	virtual void getQMatrix(double *q_mat, int mixture = 0);
+
+	/** G.6 (GPU free-Q JOLT) — see ModelSubst. Pack model free params -> out[0..getNDim()-1]. */
+	virtual void gpuGetFreeParams(double *out);
+	/** G.6 (GPU free-Q JOLT) — see ModelSubst. in[0..getNDim()-1] -> model rates, then decomposeRateMatrix(). */
+	virtual void gpuSetFreeParamsDecompose(const double *in);
 
 	/**
 		rescale the state frequencies

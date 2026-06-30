@@ -10,6 +10,27 @@
 #include "phylotree.h"
 //#include "vectorclass/vectorclass.h"
 #include "phylosupertree.h"
+#ifdef IQTREE_GPU
+#include "tree/gpu/gpu_iqtree.h"   // TS.8: gpu_parsimony_score_branches (A) + set_leaves/build_and_score (B)
+#include <vector>
+#include <atomic>
+#include <cstdio>
+#include <unordered_map>
+#include <functional>
+#include <algorithm>
+#include <chrono>
+// TS.8 Phase-B timing breakdown (env JOLT_PARS_TIMING; OFF by default => byte-identical). Picks the v2 lever:
+// produce-schedule (host) vs gpu-call (H2D+launches+sync+kernel, mutex-serialized so sum≈wall) vs CPU fallback steps.
+static std::atomic<long long> g_pb_ns_produce{0}, g_pb_ns_gpucall{0};
+static std::atomic<long long> g_pb_steps_engaged{0}, g_pb_steps_fallback{0};
+struct PbTimingDump { ~PbTimingDump() {
+    if (getenv("JOLT_PARS_TIMING"))
+        fprintf(stderr, "[GPUPARS-TIMING] engaged_steps=%lld fallback_steps=%lld produce_sum=%.3fs gpucall_sum=%.3fs\n",
+                (long long)g_pb_steps_engaged, (long long)g_pb_steps_fallback,
+                g_pb_ns_produce/1e9, g_pb_ns_gpucall/1e9);
+} };
+static PbTimingDump g_pb_timing_dump;
+#endif
 
 #if defined (__GNUC__) || defined(__clang__)
 #define vml_popcnt __builtin_popcount
@@ -1175,7 +1196,64 @@ int PhyloTree::computeParsimonyTree(const char *out_prefix, Alignment *alignment
     if (leafNum == nseq) {
         outWarning("Constraint tree has all taxa and is bifurcating, which strictly enforces final tree!");
     }
-    
+
+    // ===================== TS.8 Phase-B: device-resident parsimony (recompute-from-resident-leaves) =====================
+    // Replaces Phase-A's per-insertion partial H2D. Leaf bit-packs are tree-independent, so we upload each taxon's
+    // pack ONCE (as it enters the tree) into a device-resident buffer; per insertion the device rebuilds every
+    // directed internal partial from those leaves and scores all candidates (no partial H2D). Gated, CPU-byte-identical.
+    bool gpu_pars_batched = false;
+    int  gpu_pb_nstates = 0, gpu_pb_nsblk = 0;
+    size_t gpu_pb_scoreid = 0;
+#ifdef IQTREE_GPU
+    std::vector<UINT> gpu_pb_scratch;
+    // compute `leaf`'s bit-pack into scratch (no arena mutation) and upload it to resident slot leaf->id
+    std::function<bool(PhyloNode*,PhyloNode*)> uploadLeafRow = [&](PhyloNode* leaf, PhyloNode* dad) -> bool {
+        PhyloNeighbor* db = (PhyloNeighbor*) dad->findNeighbor(leaf);   // db->node == leaf
+        UINT* save = db->partial_pars;
+        int   savef = db->partial_lh_computed;
+        std::fill(gpu_pb_scratch.begin(), gpu_pb_scratch.end(), 0u);
+        db->partial_pars = gpu_pb_scratch.data();
+        db->partial_lh_computed = savef & ~2;                          // clear &2 to force recompute into scratch
+        computePartialParsimonyFast(db, dad);                          // leaf case: pure fn of leaf->id + alignment
+        int rc = gpu_parsimony_set_leaf_row(gpu_pb_scratch.data(), leaf->id);
+        db->partial_pars = save;
+        db->partial_lh_computed = savef;                               // restore: arena + flags untouched
+        return rc == 0;
+    };
+    // Auto-engage GPU parsimony under --gpu (GPU build only; ~2.3-3.8x, bit-identical). Read the process-global
+    // singleton, NOT the inherited MTree::params (an uninitialised raw pointer on a never-setParams'd tree, mtree.cpp:37).
+    // GPU_PARSIMONY_BATCHED stays a force-on for explicit A/B (existing PBS jobs unaffected); --cpu/--no-gpu (no_gpu) or
+    // env GPU_PARSIMONY_OFF disable it. All eligibility fences below are unchanged -> CPU fallback stays byte-identical.
+    const Params& gpars = Params::getInstance();
+    bool gpu_pars_want = (gpars.gpu || getenv("GPU_PARSIMONY_BATCHED") != nullptr)
+                         && !gpars.no_gpu && getenv("GPU_PARSIMONY_OFF") == nullptr;
+    if (gpu_pars_want && cost_matrix == nullptr
+        && !aln->isSuperAlignment() && aln->seq_type != SEQ_POMO && constraintTree.empty()) {
+        int nstates = aln->getMaxNumStates();
+        int nsblk = (aln->num_parsimony_sites + UINT_BITS - 1) / UINT_BITS;
+        if (nstates >= 1 && nstates <= 32 && nsblk >= 1) {
+            gpu_pb_scoreid = (size_t)nsblk * nstates;
+            gpu_pb_nstates = nstates; gpu_pb_nsblk = nsblk;
+            gpu_pb_scratch.assign(getBitsBlockSize(), 0u);
+            int nLeaf = (int)aln->getNSeq();
+            if (gpu_parsimony_set_leaves(nLeaf, nstates, nsblk, (const void*)aln) == 0) {
+                gpu_pars_batched = true;
+                NodeVector taxa; getTaxa(taxa);                        // the initial (3-taxon) leaves already in the tree
+                for (size_t ti = 0; ti < taxa.size() && gpu_pars_batched; ti++) {
+                    PhyloNode* lf = (PhyloNode*) taxa[ti];
+                    if (lf->neighbors.empty() || !uploadLeafRow(lf, (PhyloNode*) lf->neighbors[0]->node))
+                        gpu_pars_batched = false;
+                }
+                static std::atomic<int> _setShot{0};
+                if (gpu_pars_batched && _setShot.fetch_add(1) == 0)
+                    fprintf(stderr, "[GPUPARS-B] resident leaves: nLeaf=%d nstates=%d nsblk=%d scoreid=%zu (init %d uploaded)\n",
+                            nLeaf, nstates, nsblk, gpu_pb_scoreid, (int)taxa.size());
+            }
+        }
+    }
+#endif
+    // ===================== end Phase-B setup =====================
+
     // stepwise adding the next taxon for the remaining taxa
     for (int step = 0; leafNum < nseq; step++) {
         NodeVector nodes1, nodes2;
@@ -1215,8 +1293,88 @@ int PhyloTree::computeParsimonyTree(const char *out_prefix, Alignment *alignment
         added_node->addNeighbor((Node*) 1, -1.0);
         added_node->addNeighbor((Node*) 2, -1.0);
 
+        bool gpu_pars_done = false;
+#ifdef IQTREE_GPU
+        // ===================== TS.8 Phase-B: recompute-from-resident-leaves =====================
+        // Rebuild every DIRECTED internal partial of the CURRENT tree from the resident leaves (two-pass produce,
+        // level-scheduled) and score all candidates in one orchestrator call (no partial H2D). Bit-identical to the
+        // CPU addTaxonMPFast/computeParsimonyBranchFast. Fenced to the non-constraint strictly-bifurcating path.
+        if (gpu_pars_batched && step >= (int)removed_nei.size() && (int)nodes1.size() >= 1) {
+            const int nstates = gpu_pb_nstates, nsblk = gpu_pb_nsblk;
+            const int nCand = (int)nodes1.size();
+            auto _t_prod0 = std::chrono::steady_clock::now();
+            bool eligible = uploadLeafRow(new_taxon, added_node);   // tip row (slot new_taxon->id) resident
+
+            std::unordered_map<uint64_t,int> slotOf; slotOf.reserve(4*nCand);
+            std::vector<int> taskOut, taskA, taskB, taskLevel;
+            auto keyOf = [](int d, int n){ return ((uint64_t)(uint32_t)d<<32) | (uint32_t)n; };
+            // produce(node away from dad): ref of node's subtree partial; slot id == task index (dependency order)
+            std::function<int(Node*,Node*,int&)> produce = [&](Node* node, Node* dad, int& lvl) -> int {
+                if (node->isLeaf()) { lvl = 0; return -(node->id + 1); }            // leaf ref (resident)
+                uint64_t kk = keyOf(dad->id, node->id);
+                auto it = slotOf.find(kk);
+                if (it != slotOf.end()) { lvl = taskLevel[it->second]; return it->second; }
+                if (node->degree() != 3) { eligible = false; lvl = 0; return 0; }
+                Node *c1=nullptr,*c2=nullptr;
+                FOR_NEIGHBOR_IT(node, dad, nit) { if(!c1) c1=(*nit)->node; else c2=(*nit)->node; }
+                if (!c1 || !c2) { eligible=false; lvl=0; return 0; }
+                int lA=0,lB=0; int rA=produce(c1,node,lA), rB=produce(c2,node,lB);
+                if (!eligible) { lvl=0; return 0; }
+                int slot=(int)taskOut.size(); slotOf[kk]=slot;
+                taskOut.push_back(slot); taskA.push_back(rA); taskB.push_back(rB);
+                int L=1+std::max(lA,lB); taskLevel.push_back(L); lvl=L; return slot;
+            };
+            // candidate endpoint partials (same order as nodes1/nodes2 -> first-index tie-break holds):
+            //   candL = tn-side (nodes1 away from nodes2) ; candR = td-side (nodes2 away from nodes1)
+            std::vector<int> candL(nCand), candR(nCand);
+            for (int k=0;k<nCand && eligible;k++){
+                int d; candL[k]=produce((Node*)nodes1[k],(Node*)nodes2[k],d);
+                       candR[k]=produce((Node*)nodes2[k],(Node*)nodes1[k],d);
+            }
+            if (eligible) {
+                const int nTask=(int)taskOut.size();
+                int nLevel=0; for(int t=0;t<nTask;t++) nLevel=std::max(nLevel,taskLevel[t]);
+                std::vector<int> order(nTask); for(int t=0;t<nTask;t++) order[t]=t;
+                std::stable_sort(order.begin(),order.end(),[&](int a,int b){return taskLevel[a]<taskLevel[b];});
+                std::vector<int> newSlot(nTask); for(int i=0;i<nTask;i++) newSlot[order[i]]=i;
+                auto rmap=[&](int r){ return r<0 ? r : newSlot[r]; };
+                std::vector<int> hOut(nTask),hA(nTask),hB(nTask);
+                for(int i=0;i<nTask;i++){ int t=order[i]; hOut[i]=newSlot[taskOut[t]]; hA[i]=rmap(taskA[t]); hB[i]=rmap(taskB[t]); }
+                std::vector<int> hLevelStart(nLevel+1,0);
+                { int idx=0; for(int lv=1;lv<=nLevel;lv++){ hLevelStart[lv-1]=idx; while(idx<nTask && taskLevel[order[idx]]==lv) idx++; } hLevelStart[nLevel]=nTask; }
+                std::vector<int> hCandL(nCand),hCandR(nCand);
+                for(int k=0;k<nCand;k++){ hCandL[k]=rmap(candL[k]); hCandR[k]=rmap(candR[k]); }
+                std::vector<unsigned int> hScores(nCand,0u);
+                auto _t_call0 = std::chrono::steady_clock::now();
+                g_pb_ns_produce += std::chrono::duration_cast<std::chrono::nanoseconds>(_t_call0 - _t_prod0).count();
+                int rc = gpu_parsimony_build_and_score(nTask>0?nTask:1, hOut.data(),hA.data(),hB.data(),
+                            hLevelStart.data(), nLevel, nTask, hCandL.data(),hCandR.data(),
+                            new_taxon->id, nstates, nsblk, nCand, hScores.data(), (const void*)aln);
+                g_pb_ns_gpucall += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - _t_call0).count();
+                if (rc==0) g_pb_steps_engaged++; else g_pb_steps_fallback++;
+                static std::atomic<int> _bShot{0};
+                if (_bShot.fetch_add(1)==0)
+                    fprintf(stderr,"[GPUPARS-B] first build_and_score: rc=%d nCand=%d nTask=%d nLevel=%d (rc==0 => Phase-B engaged)\n", rc,nCand,nTask,nLevel);
+                if (rc==0) {
+                    if (getenv("GPU_PARSIMONY_VERIFY")) {       // debug: assert per-candidate == CPU on the spot
+                        for (int k=0;k<nCand;k++){
+                            int cpu = addTaxonMPFast(new_taxon, added_node, nodes1[k], nodes2[k]);
+                            if ((unsigned)cpu != hScores[k])
+                                fprintf(stderr,"[GPUPARS-B VERIFY] MISMATCH step=%d k=%d gpu=%u cpu=%d\n",step,k,hScores[k],cpu);
+                        }
+                    }
+                    for (int k=0;k<nCand;k++)
+                        if (hScores[k] < best_pars_score) { best_pars_score=hScores[k]; target_node=(PhyloNode*)nodes1[k]; target_dad=(PhyloNode*)nodes2[k]; }
+                    gpu_pars_done = true;
+                }
+            }
+        }
+        // ===================== end Phase-B =====================
+#endif
+        if (!gpu_pars_done)
         for (int nodeid = 0; nodeid < nodes1.size(); nodeid++) {
-        
+
             int score = addTaxonMPFast(new_taxon, added_node, nodes1[nodeid], nodes2[nodeid]);
             if (score < best_pars_score) {
                 best_pars_score = score;
