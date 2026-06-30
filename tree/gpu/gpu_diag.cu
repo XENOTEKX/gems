@@ -1,14 +1,11 @@
-// tree/gpu/gpu_diag.cu — Phase G.1.0 build-scaffold diagnostic for the IQ-TREE 3
-// GPU ModelFinder port.
+// tree/gpu/gpu_diag.cu — GPU toolchain diagnostic.
 //
-// Built into the `iqtree_gpu` static library, only when the CMake option
-// IQTREE_GPU is ON. Invoked from main/main.cpp's `--gpu` diagnostic hook.
+// Built into the iqtree_gpu static library only when the CMake option
+// IQTREE_GPU is ON. Invoked from main/main.cpp's --gpu diagnostic hook.
 //
-// Purpose: prove the full toolchain end-to-end with ZERO numerics yet — nvcc
-// compiles a .cu, it links into the iqtree3 executable, and a kernel actually
-// launches and runs on the device. This is the foundation that the later phases
-// build on (G.1.1 postorder lnL kernel K1, G.1.2 single-edge derivative K2,
-// G.1.3 CUDA-graph capture). See gpu-modelfinder-design.md PART II.
+// Verifies the toolchain end-to-end without any numerics: nvcc compiles a .cu,
+// it links into the iqtree3 executable, and a trivial kernel launches and runs
+// on the device.
 
 #include "tree/gpu/gpu_iqtree.h"
 
@@ -47,7 +44,7 @@ extern "C" int iqtree_gpu_info(char *name, int name_len, double *vram_gb,
 }
 
 extern "C" void iqtree_gpu_diag() {
-    std::printf("GPU: ===== IQ-TREE GPU diagnostic (Phase G.1.0 scaffold) =====\n");
+    std::printf("GPU: ===== IQ-TREE GPU diagnostic =====\n");
 
     int device_count = 0;
     cudaError_t err = cudaGetDeviceCount(&device_count);
