@@ -540,7 +540,12 @@ void PhyloTree::computePtnFreq() {
 	size_t nptn = aln->getNPattern();
 	size_t maxptn = get_safe_upper_limit(nptn)+get_safe_upper_limit(model_factory->unobserved_ptns.size());
 	int ptn;
-	for (ptn = 0; ptn < nptn; ptn++)
+	// NUMA first-touch (R1a): parallel-static fill so each pattern range is
+	// first-touched by the worker that will later read it under schedule(static).
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+	for (ptn = 0; ptn < (int)nptn; ptn++)
 		ptn_freq[ptn] = (*aln)[ptn].frequency;
 	for (ptn = nptn; ptn < maxptn; ptn++)
 		ptn_freq[ptn] = 0.0;
@@ -568,7 +573,12 @@ void PhyloTree::computePtnInvar() {
     // frequencies of the boundary states.
     model->getMutationModel()->getStateFrequency(state_freq, -1);
 
-	memset(ptn_invar, 0, maxptn*sizeof(double));
+	// NUMA first-touch (R1b): parallel-static zero-fill of ptn_invar.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+	for (size_t _p = 0; _p < maxptn; _p++)
+		ptn_invar[_p] = 0.0;
 	double p_invar = site_rate->getPInvar();
 	if (p_invar != 0.0) {
 		for (ptn = 0; ptn < nptn; ptn++) {
@@ -1283,7 +1293,17 @@ double PhyloTree::computeLikelihoodBranchEigen(PhyloNeighbor *dad_branch, PhyloN
 	}
 
 	double prob_const = 0.0;
-	memset(_pattern_lh_cat, 0, sizeof(double)*nptn*ncat_mix);
+	// NUMA first-touch (R2a): parallel-static zero-fill so _pattern_lh_cat pages
+	// are placed on the same NUMA node as the worker that later reads/writes
+	// them in the schedule(static) reduction loops below.
+	{
+	    size_t lh_cat_n = (size_t)nptn * (size_t)ncat_mix;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+	    for (size_t _k = 0; _k < lh_cat_n; _k++)
+	        _pattern_lh_cat[_k] = 0.0;
+	}
 
     if (dad->isLeaf()) {
     	// special treatment for TIP-INTERNAL NODE case
