@@ -1,0 +1,1270 @@
+##################################################################
+# IQ-TREE cmake build definition
+# Copyright (c) 2012-2015 Bui Quang Minh, Lam-Tung Nguyen
+##################################################################
+
+# For full build instructions, see .github/workflows/ci.yaml
+# CI is more likely to be up to date than the example usage section below
+
+
+# IQTREE_FLAGS (set via -DIQTREE_FLAGS=...):
+#---------------
+# single: compile sequential version (default is OpenMP)
+#
+# lto: perform link time optimization
+# static: link statically
+# nostrip: do not strip debug information
+#
+# KNL: compile for Intel Xeon Phi (KNL) architecture
+# avx: enable AVX instructions
+# fma: enable FMA instructions
+# novx: disable AVX instructions
+# nosse: disable SSE instructions
+#
+# oldmac: compile for older Mac OS X versions (10.5)
+#
+# nozlib: do not use zlib
+# libcxx
+#
+# cpp14: use C++14 standard (default is C++17)
+
+# CMAPLE: Integrate CMAPLE library
+#---------------
+# Compile IQ-TREE with CMAPLE integrated:
+# cmake -DUSE_CMAPLE=ON ....
+
+# Windows example usages:
+#------------------------
+# cmake -G "Visual Studio 12 Win64" <source_dir>    (compiled with MSVC)
+# cmake -G "Visual Studio 12 Win64" -T "Intel C++ Compiler XE 15.0" <source_dir>        (compiled with ICC)
+# cmake -G "MinGW Makefiles" <source_dir> (TDM-GCC)
+# cmake -G "Unix Makefiles" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_MAKE_PROGRAM=mingw32-make <source_dir> (TDM-GCC and clang)
+
+# Linux example usages:
+#----------------------
+# cmake <source_dir> -DIQTREE_FLAGS=single  (sequential version)
+# cmake <source_dir>                        (OpenMP version)
+#
+# To compile with CLANG on Linux:
+# export CC=/usr/bin/clang
+# export CXX=/usr/bin/clang++
+# Best practices for setting up CMAKE for diffrent compiler can be found here:
+# http://stackoverflow.com/questions/7031126/switching-between-gcc-and-clang-llvm-using-cmake
+#
+# Mac OSX example usages:
+#------------------------
+#
+# cmake -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ <source_dir>                         (OpenMP version)
+# cmake -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DIQTREE_FLAGS=single <source_dir>   (sequential version)
+#
+# Xcode project example usages:
+#------------------------------
+#
+# To generate Xcode project without OpenMP:
+# cmake -G Xcode -DIQTREE_FLAGS=single <source_dir>
+#
+# To generate Xcode project with OpenMP support,
+# assuming you installed LLVM via Homebrew: brew install --with-toolchain llvm
+# cmake -G XCode -DCMAKE_XCODE_ATTRIBUTE_CC=/usr/local/opt/llvm/bin/clang -DCMAKE_XCODE_ATTRIBUTE_CXX=/usr/local/opt/llvm/bin/clang++ <source_dir>
+# Replace /usr/local with /opt/homebrew on osx-arm64
+
+#NOTE: Static linking with clang windows: make a symlink libgcc_eh.a to libgcc.a (administrator required)
+# C:\TDM-GCC-64\lib\gcc\x86_64-w64-mingw32\5.1.0>mklink libgcc_eh.a libgcc.a
+#
+#
+
+cmake_minimum_required(VERSION 3.5) # Lowest version tested in CI (on linux x86_64)
+set(CMAKE_LEGACY_CYGWIN_WIN32 0)
+
+set(GCC_MIN_VERSION "9") # minimum GCC version that is tested in CI
+
+project(iqtree)
+add_definitions(-DIQ_TREE)
+
+# Require position independent code for IQ-TREE to be used as a library 
+if (BUILD_LIB)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
+# Find Eigen3 library
+if (NOT EIGEN3_INCLUDE_DIR)
+    find_package(Eigen3)
+    if(NOT EIGEN3_FOUND)
+        message(FATAL_ERROR "Eigen3 library not found. Either install it or rerun cmake with -DEIGEN3_INCLUDE_DIR=<installed_eigen3_dir>")
+    endif()
+endif()
+add_definitions(-I${EIGEN3_INCLUDE_DIR})
+
+# Find Boost library
+find_package(Boost REQUIRED)
+if(Boost_FOUND)
+    add_definitions(-I${Boost_INCLUDE_DIRS})
+    add_definitions(-DUSE_BOOST)
+endif()
+
+# NOTE: After updating cmake_minimum_required to 3.5, 
+# if we call check_function_exists() after set(CMAKE_EXE_LINKER_FLAGS), it returns function not found
+# So, I moved this step upward to avoid the compilation errors due to not-found functions
+##################################################################
+# check existence of a few basic functions
+##################################################################
+include (${CMAKE_ROOT}/Modules/CheckFunctionExists.cmake)
+check_function_exists (gettimeofday HAVE_GETTIMEOFDAY)
+check_function_exists (getrusage HAVE_GETRUSAGE)
+check_function_exists (GlobalMemoryStatusEx HAVE_GLOBALMEMORYSTATUSEX)
+check_function_exists (strndup HAVE_STRNDUP)
+check_function_exists (strtok_r HAVE_STRTOK_R)
+include (CheckIncludeFile)
+CHECK_INCLUDE_FILE("unistd.h" HAVE_UNISTDH)
+find_package(Backtrace)
+
+# The version number.
+set (iqtree_VERSION_MAJOR 3)
+set (iqtree_VERSION_MINOR 1)
+set (iqtree_VERSION_PATCH ".2")
+
+option(BUILD_SHARED_LIBS "Build Shared Libraries" OFF)
+
+if (CMAKE_C_COMPILER MATCHES "mpic")
+    set(IQTREE_FLAGS "${IQTREE_FLAGS} mpi")
+endif()
+
+message("IQ-TREE flags : ${IQTREE_FLAGS}")
+
+if (NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release")
+endif()
+
+if (CMAKE_BUILD_TYPE STREQUAL "Release")
+    message("Build mode   : Release")
+endif()
+
+if (BUILD_LIB)
+    message("Build lib    : ON")
+else()
+    message("Build lib    : OFF")
+endif()
+
+if (CMAKE_GENERATOR MATCHES "Xcode")
+    set(CMAKE_XCODE_ATTRIBUTE_DEBUG_INFORMATION_FORMAT "dwarf-with-dsym")
+#    if (NOT CMAKE_XCODE_ATTRIBUTE_COMPILER_INDEX_STORE_ENABLE)
+#        set(CMAKE_XCODE_ATTRIBUTE_COMPILER_INDEX_STORE_ENABLE "No")
+#    endif()
+endif()
+
+include_directories("${PROJECT_SOURCE_DIR}")
+include_directories("${PROJECT_SOURCE_DIR}/yaml-cpp/include")
+include_directories(AFTER SYSTEM "/usr/local/include")
+
+##################################################################
+# onnxruntime
+##################################################################
+option(USE_NN "Use neutual network (nn) with version 1.13 or later onnxruntime" OFF)
+option(USE_OLD_NN "Use neutual network (nn) with version 1.12 or before onnxruntime" OFF)
+
+if(USE_NN)
+    add_definitions(-D_NN)
+elseif(USE_OLD_NN)
+    add_definitions(-D_OLD_NN)
+endif()
+
+# Find onnxruntime library for machine learning
+if (USE_NN OR USE_OLD_NN)
+    if (onnxruntime_INCLUDE_DIRS)
+        add_definitions(-I${onnxruntime_INCLUDE_DIRS})
+    else()
+        find_package(onnxruntime)
+        if(onnxruntime_FOUND)
+            add_definitions(-I${onnxruntime_INCLUDE_DIRS})
+        endif()
+    endif()
+endif()
+
+if(USE_NN OR USE_OLD_NN)
+    if(NOT ONNXRUNTIME_ROOTDIR)
+        if(WIN32)
+            set(ONNXRUNTIME_ROOTDIR "C:/Program Files (x86)/onnxruntime")
+        endif()
+    endif()
+endif()
+
+##################################################################
+# Include the Terraphast library
+##################################################################
+option(USE_TERRAPHAST "Use phylogentic terraces library (terraphast)" ON)
+
+if (USE_TERRAPHAST)
+   add_definitions(-DIQTREE_TERRAPHAST)
+
+   option(TERRAPHAST_USE_GMP "" OFF)
+   option(TERRAPHAST_BUILD_CLIB "" OFF)
+   option(TERRAPHAST_BUILD_APPS "" OFF)
+   option(TERRAPHAST_BUILD_TESTS "" OFF)
+endif()
+
+##################################################################
+# Include the LSD2 library
+##################################################################
+option(USE_LSD2 "Use least square dating (lsd2)" ON)
+
+if (USE_LSD2)
+    add_definitions(-DUSE_LSD2)
+endif()
+
+# Check if __ARM_NEON is defined
+#include(cmake_utls/check_neon_exists.cmake)
+set (__ARM_NEON "FALSE")
+set (NEON 0)
+if (APPLE)
+	execute_process(
+      COMMAND uname -m
+      RESULT_VARIABLE result
+      OUTPUT_VARIABLE OSX_NATIVE_ARCHITECTURE
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+	)
+	if(OSX_NATIVE_ARCHITECTURE STREQUAL "arm64")
+		message("APPLE SILICON (M1/M2/M3) DETECTED!")
+        set (__ARM_NEON "TRUE")
+        set (NEON 1)
+    endif()
+    execute_process(
+      COMMAND sw_vers -productVersion
+      OUTPUT_VARIABLE MACOS_VERSION
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    string(REGEX MATCH "^([0-9]+)" MACOS_MAJOR_VERSION "${MACOS_VERSION}")
+    message("macOS version: ${MACOS_VERSION} (major: ${MACOS_MAJOR_VERSION})")
+elseif (UNIX AND NOT APPLE)  # Unix and Linux
+    execute_process(
+      COMMAND uname -m
+      RESULT_VARIABLE result
+      OUTPUT_VARIABLE OS_NATIVE_ARCHITECTURE
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(OS_NATIVE_ARCHITECTURE STREQUAL "aarch64")
+        message("Unix/Linux ARM64 DETECTED!")
+	    set (__ARM_NEON "TRUE")
+		set (NEON 1)
+	endif()
+endif()
+
+##################################################################
+# Include the CMAPLE library
+##################################################################
+
+if (NOT WIN32)
+    # temporarily disable cmaple for Windows, next to fix for next release
+    option(USE_CMAPLE "Integrate CMAPLE" ON)
+endif()
+
+option(USE_CMAPLE_AA "Integrate CMAPLE-AA" OFF)
+
+if (BUILD_LIB)
+    set(USE_CMAPLE "OFF")
+    set(USE_CMAPLE_AA "OFF")
+endif()
+
+if (USE_CMAPLE STREQUAL "ON")
+	message("Integrate CMAPLE: ON")
+    add_definitions(-DUSE_CMAPLE)
+    set(TARGET_CMAPLE "maple")
+    if (IQTREE_FLAGS MATCHES static)
+        set(CMAPLE_FLAGS "${CMAPLE_FLAGS} static")
+    endif()
+else()
+	message("Integrate CMAPLE: OFF")
+	set(TARGET_CMAPLE "")
+endif()
+
+
+if (USE_CMAPLE_AA STREQUAL "ON")
+    message("Integrate CMAPLE_AA: ON")
+    #add_definitions(-DUSE_CMAPLE)
+else()
+    message("Integrate CMAPLE_AA: OFF")
+endif()
+
+##################################################################
+# build IQTREE library
+##################################################################
+option(BUILD_LIB "Build IQTREE library" OFF)
+
+if (BUILD_LIB)
+    message("Build IQTREE library: ON")
+    add_definitions(-DBUILD_LIB)
+else()
+    message("Build IQTREE library: OFF")
+endif()
+
+##################################################################
+# Detect target platforms
+##################################################################
+if (WIN32)
+    message("Target OS     : Windows")
+    # build as static binary to run on most machines
+    if (IQTREE_FLAGS MATCHES "static")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+    endif()
+    SET(CMAKE_FIND_LIBRARY_SUFFIXES .lib .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
+elseif (APPLE)
+    message("Target OS     : Mac OS X")
+	if(OSX_NATIVE_ARCHITECTURE STREQUAL "arm64")
+		add_definitions("--target=arm64-apple-macos11.0.1")
+        # set the first version of mac 11 that supports ARM
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --target=arm64-apple-macos11.0.1")
+	else()
+		# to be compatible back to Mac OS X 10.7
+    	if (IQTREE_FLAGS MATCHES "oldmac")
+        	add_definitions("-mmacosx-version-min=10.5")
+        	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -mmacosx-version-min=10.5")
+    	else()
+            # supports the first version changed from OS X to macOS
+        	add_definitions("--target=x86_64-apple-macos10.12")
+            set(CMAKE_OSX_DEPLOYMENT_TARGET 10.12)
+            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --target=x86_64-apple-macos10.12")
+    	endif()
+	endif()
+    SET(CMAKE_FIND_LIBRARY_SUFFIXES .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
+elseif (UNIX)
+    message("Target OS     : Unix")
+    # build as static binary to run on most machines
+    if (NOT IQTREE_FLAGS MATCHES "static")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -rdynamic")
+    else()
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+    endif()
+else()
+    # Note that IQ-TREE has NOT been tested on other platforms
+    message("Target OS     : Unknown and untested yet")
+endif()
+
+##################################################################
+# Setup compiler, currently supported GCC, CLANG, MSVC, and ICC
+##################################################################
+
+set(GCC "FALSE")   #  GNU compiler
+set(CLANG "FALSE") # Clang compiler
+set(ICC "FALSE")   # Intel compiler
+set(VCC "FALSE")   # MS Visual C Compiler, note that it is different from MSVC variable
+set(CLANG_UNDER_VS "FALSE") #Clang compiler, used from inside Visual Studio
+# using C++17 standard (unless IQTREE_FLAGS specifies c++14, required for compilation using mingw in Github actions)
+# disable AVX for NEON
+if (__ARM_NEON)
+    set(IQTREE_FLAGS "${IQTREE_FLAGS} novx")
+elseif (CMAKE_CXX_COMPILER MATCHES "VISUAL STUDIO")
+    set(CLANG_UNDER_VS "TRUE")
+    #it won't recognize the -std=c++17 parameter.
+    #Todo: don't hard-code this; figure out some way it can be passed in (though ideally, not the whole shebang).
+    include_directories("C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\VC\\Tools\\Llvm\\lib\\clang\\10.0.0\\include")
+elseif(IQTREE_FLAGS MATCHES "cpp14")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+endif()
+
+if (CMAKE_COMPILER_IS_GNUCXX)
+    message("Compiler      : GNU Compiler (gcc)")
+    set(GCC "TRUE")
+#    set(COMBINED_FLAGS "-Wall -Wno-unused-function -Wno-sign-compare -pedantic -D_GNU_SOURCE -fms-extensions -Wno-deprecated")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O2 -g -ffunction-sections -fdata-sections")
+    set(CMAKE_C_FLAGS_RELEASE "-O2 -g -ffunction-sections -fdata-sections")
+    if (APPLE)
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,-dead_strip")
+    else()
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--gc-sections")
+    endif()
+    # require at least gcc ${GCC_MIN_VERSION}
+    if (CMAKE_CXX_COMPILER_VERSION VERSION_LESS GCC_MIN_VERSION)
+        message(FATAL_ERROR "GCC version must be at least ${GCC_MIN_VERSION}!")
+    endif()
+    if (WIN32)
+        # disable AVX on Windows due to memory alignment
+        set(IQTREE_FLAGS "${IQTREE_FLAGS} novx")
+        message("WARNING: AVX is disabled on Windows as GCC does not properly suport memory alignment")
+    endif()
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message("Compiler      : Clang")
+    set(CLANG "TRUE")
+#    set(COMBINED_FLAGS "-Wall -Wno-unused-function -Wno-sign-compare -pedantic -D_GNU_SOURCE -Wno-nested-anon-types")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -ffunction-sections -fdata-sections")
+    set(CMAKE_C_FLAGS_RELEASE "-O3 -ffunction-sections -fdata-sections")
+    if (APPLE)
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,-dead_strip")
+    else()
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--gc-sections")
+    endif()
+
+    # use libc++ per default in MacOS
+    if (APPLE)
+        SET(CMAKE_XCODE_ATTRIBUTE_CLANG_CXX_LIBRARY "libc++")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+    endif()
+
+    #remove -rdynamic for Clang under Linux
+    if (UNIX AND IQTREE_FLAGS MATCHES "static")
+        SET(CMAKE_SHARED_LIBRARY_LINK_CXX_FLAGS)
+    endif()
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+    set(VCC "TRUE")
+    message("Compiler      : MS Visual C++ Compiler")
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "Intel")
+    message("Compiler      : Intel C++ Compiler (icc)")
+    set(ICC "TRUE")
+    #set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /Qstd=c99")
+else()
+    message("Compiler      : Unknown and untested yet")
+endif()
+message("Compiler version: ${CMAKE_CXX_COMPILER_VERSION}")
+
+if (CLANG AND UNIX AND NOT APPLE AND NOT __ARM_NEON)
+    find_program(LLD_EXECUTABLE NAMES ld.lld lld)
+    if (LLD_EXECUTABLE)
+        message("Linker        : lld (${LLD_EXECUTABLE})")
+        set(CMAKE_EXE_LINKER_FLAGS    "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
+        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fuse-ld=lld")
+        set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fuse-ld=lld")
+    else()
+        message(FATAL_ERROR "lld not found on PATH. Required for clang LTO builds on Linux. Install with: apt install lld   (or: yum install lld). Alternatively, disable LTO in iqtree3/cmaple/CMakeLists.txt.")
+    endif()
+endif()
+
+set(EXE_SUFFIX "")
+
+if (MSVC)
+    # MS Visual Studio environment
+    message("Exporting MS Visual Studio projects...")
+    if (CLANG_UNDER_VS)
+        #see https://clang.llvm.org/docs/UsersManual.html#clang-cl
+        #note .GX is how you say -fexceptions
+        add_definitions(/D_UWIN)
+        set(CMAKE_C_FLAGS_RELEASE "/O2 /GX")
+        set(CMAKE_C_FLAGS_DEBUG   "/D_UWIN /GX")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /I${EIGEN3_INCLUDE_DIR}")
+    else()
+        add_definitions(/MP) # enable multi-processor compilation
+    endif()
+    if (CMAKE_BUILD_TYPE STREQUAL "Release")
+        add_definitions(/Ot /Oi)
+        if (VCC)
+            add_definitions(/O2)
+        elseif (ICC)
+            add_definitions(/O3)
+        endif()
+    endif()
+endif()
+
+# enable link time optimization
+if (IQTREE_FLAGS MATCHES "lto")
+    #if (CLANG)
+    #    set(COMBINED_FLAGS "${COMBINED_FLAGS} -flto=thin")
+    #else()
+        set(COMBINED_FLAGS "${COMBINED_FLAGS} -flto")
+    #endif()
+endif()
+
+# for mac arm boost compilation issue
+if (__ARM_NEON AND APPLE)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Dthread_local=")
+endif()
+
+# for list of libraries to combine with for building IQTREE3 static library
+SET(STATIC_LIBS "${PROJECT_BINARY_DIR}/libiqtree3.a")
+
+
+##################################################################
+# detect 32 or 64 bit binary
+##################################################################
+set (BINARY32 "FALSE")
+if(CMAKE_SIZEOF_VOID_P EQUAL 4 OR IQTREE_FLAGS MATCHES "m32")
+    error("32-bit compilation is not supported")
+else()
+    message("Target binary : 64-bit")
+    if (CLANG_UNDER_VS)
+        set(COMBINED_FLAGS "${COMBINED_FLAGS} -m64")
+    endif()
+    if (WIN32)
+        add_definitions(-DWIN64)
+    endif()
+endif()
+
+##################################################################
+# configure MPI compilation
+##################################################################
+
+if (IQTREE_FLAGS MATCHES "mpi")
+    add_definitions(-D_IQTREE_MPI)
+    if (NOT CMAKE_CXX_COMPILER MATCHES "mpi")
+        # if not using the MPI compiler wrapper, set own options manually
+        find_package(MPI)
+        if (MPI_Found)
+            set(CMAKE_CXX_COMPILE_FLAGS "${CMAKE_CXX_COMPILE_FLAGS} ${MPI_CXX_COMPILE_FLAGS}")
+            set(CMAKE_C_COMPILE_FLAGS "${CMAKE_C_COMPILE_FLAGS} ${MPI_C_COMPILE_FLAGS}")
+            set(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} ${MPI_CXX_LINK_FLAGS}")
+            set(CMAKE_C_LINK_FLAGS "${CMAKE_C_LINK_FLAGS} ${MPI_C_LINK_FLAGS}")
+            include_directories(${MPI_C_INCLUDE_PATH})
+            include_directories(${MPI_CXX_INCLUDE_PATH})
+        else()
+            if(CLANG_UNDER_VS)
+                #Under Visual Studio, the MPI package isn't found, if you haven't installed FORTRAN
+                set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /I${MPI_DIR}/Include")
+                set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /I${MPI_DIR}/Include")
+                #Zork. Linker
+                #message("MPI DIR was ${MPI_DIR}")
+                set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /LIBPATH:${MPI_DIR}\\lib\\x64 msmpi.lib /PROFILE")
+            endif()
+        endif()
+    endif()
+endif()
+
+
+##################################################################
+# Configure PLL build
+##################################################################
+if (IQTREE_FLAGS MATCHES "pll")
+    add_definitions(-DUSING_PLL)
+    set(EXE_SUFFIX "${EXE_SUFFIX}-pll")
+endif()
+
+if(IQTREE_FLAGS MATCHES "novx")
+    add_definitions(-D__NOAVX__)
+endif()
+
+##################################################################
+# configure OpenMP/PThreads compilation
+# change the executable name if compiled for OpenMP parallel version
+##################################################################
+if (NOT IQTREE_FLAGS MATCHES "single")
+    message("OpenMP        : Yes")
+    #SET(EXE_SUFFIX "${EXE_SUFFIX}-omp")
+    if (NOT CLANG_UNDER_VS)
+        add_definitions(-D_USE_PTHREADS)
+    endif()
+    if (MSVC)
+        if (NOT CLANG_UNDER_VS)
+            add_definitions(/MT)
+        endif()
+    endif()
+
+    # Path of the bundled LLVM libomp.a for different platforms.
+    set(BUNDLED_OMP_LIB "")
+
+    if(APPLE)
+    	if(OSX_NATIVE_ARCHITECTURE STREQUAL "arm64")
+            if(MACOS_MAJOR_VERSION GREATER_EQUAL 26)
+                message("Using libmac26_m1 for macOS ${MACOS_VERSION}")
+                link_directories(${PROJECT_SOURCE_DIR}/libmac26_m1)
+                LIST(APPEND STATIC_LIBS "${PROJECT_SOURCE_DIR}/libmac26_m1/libomp.a" "${PROJECT_SOURCE_DIR}/libmac_m1/libz.a")
+                set(BUNDLED_OMP_LIB "${PROJECT_SOURCE_DIR}/libmac26_m1/libomp.a")
+            else()
+                link_directories(${PROJECT_SOURCE_DIR}/libmac_m1)
+                LIST(APPEND STATIC_LIBS "${PROJECT_SOURCE_DIR}/libmac_m1/libomp.a" "${PROJECT_SOURCE_DIR}/libmac_m1/libz.a")
+                set(BUNDLED_OMP_LIB "${PROJECT_SOURCE_DIR}/libmac_m1/libomp.a")
+            endif()
+    	else()
+    		if(MACOS_MAJOR_VERSION GREATER_EQUAL 26)
+                message("Using libmac26 for macOS ${MACOS_VERSION}")
+                link_directories(${PROJECT_SOURCE_DIR}/libmac26)
+                LIST(APPEND STATIC_LIBS "${PROJECT_SOURCE_DIR}/libmac26/libomp.a" "${PROJECT_SOURCE_DIR}/libmac/libz.a")
+                set(BUNDLED_OMP_LIB "${PROJECT_SOURCE_DIR}/libmac26/libomp.a")
+            else()
+            	link_directories(${PROJECT_SOURCE_DIR}/libmac)
+            	LIST(APPEND STATIC_LIBS "${PROJECT_SOURCE_DIR}/libmac/libomp.a" "${PROJECT_SOURCE_DIR}/libmac/libz.a")
+                set(BUNDLED_OMP_LIB "${PROJECT_SOURCE_DIR}/libmac/libomp.a")
+            endif()
+      endif()
+    elseif (UNIX AND NOT ${CMAKE_SYSTEM_NAME} STREQUAL "FreeBSD")
+      if (__ARM_NEON)
+        link_directories(${PROJECT_SOURCE_DIR}/liblinux_arm)
+        LIST(APPEND STATIC_LIBS "${PROJECT_SOURCE_DIR}/liblinux_arm/libomp.a" "${PROJECT_SOURCE_DIR}/liblinux_arm/libz.a")
+        set(BUNDLED_OMP_LIB "${PROJECT_SOURCE_DIR}/liblinux_arm/libomp.a")
+      elseif(BUILD_LIB)
+        find_package(OpenMP)
+      else()
+        link_directories(${PROJECT_SOURCE_DIR}/lib)
+        LIST(APPEND STATIC_LIBS "${PROJECT_SOURCE_DIR}/lib/libomp.a" "${PROJECT_SOURCE_DIR}/lib/libz.a")
+        set(BUNDLED_OMP_LIB "${PROJECT_SOURCE_DIR}/lib/libomp.a")
+      endif()
+    elseif (WIN32)
+        link_directories(${PROJECT_SOURCE_DIR}/lib)
+    endif()
+
+    if (VCC)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /openmp")
+        include_directories("${PROJECT_SOURCE_DIR}/pll") # for PThreads headers
+    elseif (ICC)
+        if (WIN32)
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Qopenmp")
+            include_directories("${PROJECT_SOURCE_DIR}/pll") # for PThreads headers
+        else()
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -qopenmp")
+        endif()
+    elseif (GCC)
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
+        # To improve the performance, use the bundled LLVM libomp.a if it is available for the platform
+        if (BUNDLED_OMP_LIB AND EXISTS "${BUNDLED_OMP_LIB}" AND NOT BUILD_LIB)
+            message("GCC: linking bundled LLVM libomp instead of libgomp (${BUNDLED_OMP_LIB})")
+            add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fopenmp>)
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
+            set(GCC_USE_BUNDLED_OMP "TRUE")
+        else()
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp -pthread")
+        endif()
+    elseif (CLANG)
+        if (CLANG_UNDER_VS)
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /openmp /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /DCLANG_UNDER_VS=1")
+            set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   /openmp /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /DCLANG_UNDER_VS=1")
+            include_directories("${PROJECT_SOURCE_DIR}/pll") # for PThreads headers
+            
+            #Next two lines don't work for me, as I only have VS 2019 Community
+            #set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /implib:vcomp.lib")
+            #set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} /implib:vcompd.lib")
+
+            #The problem here is that LLVM installs either 64 bit or 32 bit libraries, but not both.
+            #Though perhaps in debug builds this should be libiomp5md.lib
+            set (LLVM_DIR "C:\\Projects\\LLVM_10")
+            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /LIBPATH:${LLVM_DIR}\\lib libomp.lib")
+
+            #Also need to ensure libomp.dll is in the path (or copied into the output directory).
+            #(You want the one in ${LLVM_DIR}\\bin
+            #But I don't as yet know how to tell CMake to do that. -James B. 23-Jul-2020
+        else()
+            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
+            if (APPLE OR WIN32 )            
+                set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Xpreprocessor -fopenmp -pthread")
+                set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lomp")
+            else()
+                set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp -pthread")
+            endif()
+        endif()
+    endif()
+else()
+    message("OpenMP        : NONE")
+endif()
+
+
+if (IQTREE_FLAGS MATCHES "mpi")
+    message("MPI           : Yes")
+    SET(EXE_SUFFIX "${EXE_SUFFIX}-mpi")
+else()
+    message("MPI           : NONE")
+endif()
+
+##################################################################
+# configure SSE/AVX/FMA instructions
+##################################################################
+
+SET(AVX_FLAGS "-D__SSE3 -D__AVX")
+if (VCC)
+    set(AVX_FLAGS "${AVX_FLAGS} /arch:AVX")
+elseif (CLANG)
+    if (__ARM_NEON)
+        set(AVX_FLAGS "${AVX_FLAGS} -march=armv8-a+fp+simd+crypto+crc")
+    else()
+        set(AVX_FLAGS "${AVX_FLAGS} -mavx")
+    endif()
+elseif (GCC)
+    if (__ARM_NEON)
+        set(AVX_FLAGS "${AVX_FLAGS} -march=armv8-a+fp+simd+crypto+crc")
+    else()
+        set(AVX_FLAGS "${AVX_FLAGS} -mavx -fabi-version=0")
+    endif()
+elseif (ICC)
+    if (WIN32)
+         set(AVX_FLAGS "${AVX_FLAGS} /arch:avx")
+    else()
+         set(AVX_FLAGS "${AVX_FLAGS} -mavx")
+    endif()
+endif()
+
+SET(SSE_FLAGS "-D__SSE3")
+if (VCC)
+    set(SSE_FLAGS "${SSE_FLAGS} /arch:SSE2 -D__SSE3__")
+elseif (GCC OR CLANG)
+    if (__ARM_NEON)
+        set(SSE_FLAGS "${SSE_FLAGS} -march=armv8-a+fp+simd+crypto+crc")
+    else()
+        set(SSE_FLAGS "${SSE_FLAGS} -msse3")
+    endif()
+elseif (ICC)
+    if (WIN32)
+        set(SSE_FLAGS "${SSE_FLAGS} /arch:sse3")
+    else()
+        set(SSE_FLAGS "${SSE_FLAGS} -msse3")
+    endif()
+endif()
+
+SET(FMA_FLAGS "-D__SSE3 -D__AVX")
+if (VCC)
+    set(FMA_FLAGS "${FMA_FLAGS} /arch:AVX2")
+elseif (CLANG)
+    if (__ARM_NEON)
+        set(FMA_FLAGS "${FMA_FLAGS} -march=armv8-a+fp+simd+crypto+crc")
+    else()
+        set(FMA_FLAGS "${FMA_FLAGS} -mavx -mfma")
+    endif()
+elseif (GCC)
+    if (__ARM_NEON)
+        set(FMA_FLAGS "${FMA_FLAGS} -march=armv8-a+fp+simd+crypto+crc")
+    else()
+        set(FMA_FLAGS "${FMA_FLAGS} -mavx -fabi-version=0 -mfma")
+    endif()
+elseif (ICC)
+    if (WIN32)
+         set(FMA_FLAGS "${FMA_FLAGS} /arch:core-avx2")
+    else()
+         set(FMA_FLAGS "${FMA_FLAGS} -march=core-avx2")
+    endif()
+endif()
+
+SET(AVX512_FLAGS "-D__SSE3 -D__AVX")
+if (VCC)
+    message("AVX512 not available in Visual C++")
+    #set(AVX512_FLAGS "${AVX512_FLAGS} /arch:AVX512")
+elseif (CLANG)
+    set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mfma")
+elseif (GCC)
+    set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mfma")
+elseif (ICC)
+    if (WIN32)
+         set(AVX512_FLAGS "${AVX512_FLAGS} /QxMIC-AVX512")
+    else()
+         set(AVX512_FLAGS "${AVX512_FLAGS} -xMIC-AVX512")
+    endif()
+endif()
+
+# further flag to improve performance
+
+if (IQTREE_FLAGS MATCHES "fma") # AVX+FMA instruction set
+    message("Vectorization : AVX+FMA")
+    add_definitions(-D__SSE3 -D__AVX) # define both SSE3 and AVX directive
+    set(COMBINED_FLAGS "${COMBINED_FLAGS} ${FMA_FLAGS}")
+    #SET(EXE_SUFFIX "${EXE_SUFFIX}-fma")
+elseif (IQTREE_FLAGS MATCHES "avx") # AVX instruction set
+    message("Vectorization : AVX")
+    add_definitions(-D__SSE3 -D__AVX) # define both SSE3 and AVX directive
+    set(COMBINED_FLAGS "${COMBINED_FLAGS} ${AVX_FLAGS}")
+    #SET(EXE_SUFFIX "${EXE_SUFFIX}-avx")
+elseif (NOT IQTREE_FLAGS MATCHES "nosse") #SSE intruction set
+    if (IQTREE_FLAGS MATCHES "KNL")
+        message("Vectorization : SSE3/AVX/AVX2/AVX-512")
+        add_definitions(-D__AVX512KNL)
+    elseif (NOT __ARM_NEON)
+        message("Vectorization : SSE3/AVX/AVX2")
+    endif()
+    #add_definitions(-D__SSE3)
+    #set(COMBINED_FLAGS "${COMBINED_FLAGS} ${SSE_FLAGS}")
+endif()
+
+
+##################################################################
+# Setup compiler flags
+##################################################################
+
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${COMBINED_FLAGS}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${COMBINED_FLAGS}")
+set(CMAKE_CXX_FLAGS_PROFILE "${CMAKE_CXX_FLAGS} -fno-inline-functions -fno-inline-functions-called-once -fno-optimize-sibling-calls -fno-default-inline -fno-inline -O2 -fno-omit-frame-pointer -g")
+set(CMAKE_C_FLAGS_PROFILE "${CMAKE_C_FLAGS} -fno-inline-functions -fno-inline-functions-called-once -fno-optimize-sibling-calls -O2 -fno-omit-frame-pointer -g")
+
+if(CLANG AND IQTREE_FLAGS MATCHES "static")
+    #set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pthread -Wl,--allow-multiple-definition")
+    set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pthread")
+endif()
+
+if (IQTREE_FLAGS MATCHES "libcxx")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
+endif()
+
+
+if (CMAKE_BUILD_TYPE STREQUAL "Release")
+    message("C flags       : ${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_RELEASE}")
+    message("CXX flags     : ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_RELEASE}")
+endif()
+
+if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message("C flags       : ${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_DEBUG}")
+    message("CXX flags     : ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_DEBUG}")
+endif()
+
+if (CMAKE_BUILD_TYPE STREQUAL "Profile")
+    message("C flags       : ${CMAKE_C_FLAGS_PROFILE} ")
+    message("CXX flags     : ${CMAKE_CXX_FLAGS_PROFILE} ")
+endif()
+
+message("LINKER flags  : ${CMAKE_EXE_LINKER_FLAGS} ${CMAKE_EXE_LINKER_FLAGS_RELEASE}")
+
+
+if (GCC)
+    set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fno-inline-functions -fno-inline-functions-called-once -fno-default-inline -fno-inline")
+    set(CMAKE_C_FLAGS_DEBUG "-O0 -g -fno-inline-functions -fno-inline-functions-called-once -fno-default-inline -fno-inline")
+    set(CMAKE_CXX_FLAGS_MEM "-g -O1")
+    set(CMAKE_C_FLAGS_MEM "-g -O1")
+elseif (CLANG AND NOT CLANG_UNDER_VS)
+    set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fno-inline-functions -fno-inline")
+    set(CMAKE_C_FLAGS_DEBUG "-O0 -g -fno-inline-functions -fno-inline")
+    set(CMAKE_CXX_FLAGS_MEM "-g -O1")
+    set(CMAKE_C_FLAGS_MEM "-g -O1")
+endif()
+
+# configure a header file to pass some of the CMake settings
+# to the source code
+configure_file (
+  "${PROJECT_SOURCE_DIR}/iqtree_config.h.in"
+  "${PROJECT_BINARY_DIR}/iqtree_config.h"
+  )
+
+# add the binary tree to the search path for include files
+# so that we will find iqtree_config.h
+include_directories("${PROJECT_BINARY_DIR}")
+
+# add the binary tree to the search path for include files
+# so that we will find cmaple/cmaple_config.h
+if (USE_CMAPLE STREQUAL "ON")
+	include_directories("${PROJECT_BINARY_DIR}/cmaple")
+endif()
+
+#zlib will be detected for appearance
+#include_directories("${PROJECT_BINARY_DIR}/zlib-1.2.7")
+
+
+if (NOT IQTREE_FLAGS MATCHES "nozlib" AND NOT IQTREE_FLAGS MATCHES "static")
+    find_package(ZLIB)
+endif()
+
+if(ZLIB_FOUND)
+  message ("Using system zlib")
+  include_directories(${ZLIB_INCLUDE_DIRS})
+else(ZLIB_FOUND)
+  message ("Using own zlib-1.2.7")
+  include_directories("${PROJECT_BINARY_DIR}/zlib-1.2.7" "${PROJECT_SOURCE_DIR}/zlib-1.2.7")
+  add_subdirectory(zlib-1.2.7)
+endif(ZLIB_FOUND)
+
+##################################################################
+# subdirectories containing necessary libraries for the build
+##################################################################
+option(USE_BOOSTER "Use Booster for transfer bootstrap expectation" ON)
+if (USE_BOOSTER)
+    add_subdirectory(booster)
+    add_definitions(-DUSE_BOOSTER)
+endif()
+
+add_subdirectory(pll)
+add_subdirectory(ncl)
+add_subdirectory(nclextra)
+add_subdirectory(utils)
+add_subdirectory(pda)
+add_subdirectory(lbfgsb)
+add_subdirectory(whtest)
+add_subdirectory(sprng)
+#add_subdirectory(zlib-1.2.7)
+add_subdirectory(vectorclass)
+LIST(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}")
+add_subdirectory(model)
+add_subdirectory(gsl)
+add_subdirectory(alignment)
+add_subdirectory(tree)
+add_subdirectory(terrace)
+add_subdirectory(simulator)
+
+if (USE_NN OR USE_OLD_NN)
+add_subdirectory(nn)
+endif()
+
+if (USE_CMAPLE STREQUAL "ON")
+	SET(INSTALL_CMAPLE OFF CACHE BOOL "Disable installation of googletest" FORCE)
+	add_subdirectory(cmaple)
+endif()
+
+# YAML library
+option(YAML_CPP_BUILD_TESTS "Enable testing" OFF)
+option(YAML_CPP_BUILD_TOOLS "Enable parse tools" OFF)
+option(YAML_CPP_BUILD_CONTRIB "Enable contrib stuff in library" OFF)
+option(YAML_CPP_INSTALL "Enable generation of install target" OFF)
+add_subdirectory(yaml-cpp)
+add_subdirectory(phylo-yaml)
+
+if (USE_TERRAPHAST)
+   add_subdirectory(terraphast)
+   add_subdirectory(terracetphast)
+endif()
+
+if (USE_LSD2)
+    add_subdirectory(lsd2)
+endif()
+
+##################################################################
+# the main executable
+##################################################################
+
+add_library(kernelsse tree/phylokernelsse.cpp)
+
+if (NOT BINARY32 AND NOT IQTREE_FLAGS MATCHES "novx")
+    add_library(kernelavx tree/phylotreeavx.cpp)
+    add_library(kernelfma tree/phylokernelfma.cpp)
+    if (IQTREE_FLAGS MATCHES "KNL")
+        add_library(kernelavx512 tree/phylokernelavx512.cpp)
+    endif()
+endif()
+
+add_subdirectory(main)
+
+##################################################################
+# build lib file or main executable
+##################################################################
+if (BUILD_LIB)
+    add_library(iqtree3
+        obsolete/parsmultistate.cpp
+        obsolete/parsmultistate.h
+    )
+    
+else()
+    add_executable(iqtree3
+        obsolete/parsmultistate.cpp
+        obsolete/parsmultistate.h
+    )
+endif()
+
+if (USE_CMAPLE_AA STREQUAL "ON")
+	add_executable(iqtree3-aa
+	obsolete/parsmultistate.cpp
+	obsolete/parsmultistate.h
+	)
+endif()
+
+if(Backtrace_FOUND)
+  include_directories(${Backtrace_INCLUDE_DIR})
+  target_link_libraries(iqtree3 ${Backtrace_LIBRARY})
+  if (USE_CMAPLE_AA STREQUAL "ON")
+  	target_link_libraries(iqtree3-aa ${Backtrace_LIBRARY})
+  endif()
+endif(Backtrace_FOUND)
+
+if (USE_BOOSTER)
+    target_link_libraries(iqtree3 booster)
+    LIST(APPEND STATIC_LIBS "${PROJECT_BINARY_DIR}/booster/libbooster.a")
+    if (USE_CMAPLE_AA STREQUAL "ON")
+    	target_link_libraries(iqtree3-aa booster)
+    endif()
+endif()
+
+if (NOT IQTREE_FLAGS MATCHES "avx" AND NOT IQTREE_FLAGS MATCHES "fma")
+    if (NOT IQTREE_FLAGS MATCHES "nosse")
+        set_target_properties(iqtree3 ncl nclextra utils pda lbfgsb whtest sprng vectorclass model gsl alignment tree simulator yaml-cpp phyloYAML main ${TARGET_CMAPLE} PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
+        if (USE_CMAPLE_AA STREQUAL "ON")
+        	set_target_properties(iqtree3-aa ncl nclextra utils pda lbfgsb whtest sprng vectorclass model gsl alignment tree simulator yaml-cpp phyloYAML main-aa maple-aa PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
+        endif()
+        if (USE_TERRAPHAST)
+            set_target_properties(terracetphast terraphast PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
+        endif()
+        if (USE_LSD2)
+            set_target_properties(lsd2 PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
+        endif()
+        if (USE_BOOSTER)
+            set_target_properties(booster PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
+        endif()
+    endif()
+    set_target_properties(kernelsse pll PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
+    if (NOT IQTREE_FLAGS MATCHES "novx")
+        set_target_properties(kernelavx pllavx PROPERTIES COMPILE_FLAGS "${AVX_FLAGS}")
+        set_target_properties(kernelfma PROPERTIES COMPILE_FLAGS "${FMA_FLAGS}")
+        if (IQTREE_FLAGS MATCHES "KNL")
+            set_target_properties(kernelavx512 PROPERTIES COMPILE_FLAGS "${AVX512_FLAGS}")
+        endif()
+    endif()
+endif()
+
+if(USE_NN OR USE_OLD_NN)
+target_link_libraries(iqtree3 nn)
+endif()
+
+##################################################################
+# setup linking flags
+##################################################################
+
+# link special lib for WIN32
+if (WIN32)
+    set(PLATFORM_LIB "ws2_32")
+else()
+    set(PLATFORM_LIB "m")
+endif()
+
+if (IQTREE_FLAGS MATCHES "libcxx")
+    set(STD_LIB "c++abi")
+endif()
+
+set(THREAD_LIB "")
+if (NOT IQTREE_FLAGS MATCHES "single")
+    if (MSVC)
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /LIBPATH:${PROJECT_SOURCE_DIR}/lib")
+        set(THREAD_LIB "pthreadVC2")
+    elseif(CLANG AND WIN32)
+        if (BINARY32)
+            target_link_libraries(iqtree3 ${PROJECT_SOURCE_DIR}/lib32/libiomp5md.dll)
+            LIST(APPEND STATIC_LIBS "${PROJECT_SOURCE_DIR}/lib32/libiomp5md.dll")
+            if (USE_CMAPLE_AA STREQUAL "ON")
+            	target_link_libraries(iqtree3-aa ${PROJECT_SOURCE_DIR}/lib32/libiomp5md.dll)
+            endif()
+        else()
+            target_link_libraries(iqtree3 ${PROJECT_SOURCE_DIR}/lib/libiomp5md.dll)
+            LIST(APPEND STATIC_LIBS "${PROJECT_SOURCE_DIR}/lib/libiomp5md.dll")
+            if (USE_CMAPLE_AA STREQUAL "ON")
+            	target_link_libraries(iqtree3-aa ${PROJECT_SOURCE_DIR}/lib/libiomp5md.dll)
+            endif()
+        endif()
+    endif()
+endif()
+
+# basic linking librararies
+target_link_libraries(iqtree3 pll ncl nclextra utils pda lbfgsb whtest sprng vectorclass model
+    gsl alignment tree simulator terrace yaml-cpp phyloYAML main ${TARGET_CMAPLE} ${PLATFORM_LIB} ${STD_LIB} ${THREAD_LIB} ${ATOMIC_LIB})
+
+# Link the bundled LLVM libomp.a even for GCC builds
+# dl is needed by libomp on Linux for dlsym
+if (GCC_USE_BUNDLED_OMP)
+    target_link_libraries(iqtree3 ${BUNDLED_OMP_LIB})
+    if (UNIX AND NOT APPLE)
+        target_link_libraries(iqtree3 dl)
+    endif()
+    if (USE_CMAPLE_AA STREQUAL "ON")
+        target_link_libraries(iqtree3-aa ${BUNDLED_OMP_LIB})
+        if (UNIX AND NOT APPLE)
+            target_link_libraries(iqtree3-aa dl)
+        endif()
+    endif()
+endif()
+
+LIST(APPEND STATIC_LIBS "${PROJECT_BINARY_DIR}/pll/libpll.a" "${PROJECT_BINARY_DIR}/ncl/libncl.a" "${PROJECT_BINARY_DIR}/nclextra/libnclextra.a" "${PROJECT_BINARY_DIR}/utils/libutils.a" "${PROJECT_BINARY_DIR}/pda/libpda.a" "${PROJECT_BINARY_DIR}/lbfgsb/liblbfgsb.a" "${PROJECT_BINARY_DIR}/whtest/libwhtest.a" "${PROJECT_BINARY_DIR}/sprng/libsprng.a" "${PROJECT_BINARY_DIR}/vectorclass/libvectorclass.a" "${PROJECT_BINARY_DIR}/model/libmodel.a" "${PROJECT_BINARY_DIR}/gsl/libgsl.a" "${PROJECT_BINARY_DIR}/alignment/libalignment.a" "${PROJECT_BINARY_DIR}/tree/libtree.a" "${PROJECT_BINARY_DIR}/simulator/libsimulator.a" "${PROJECT_BINARY_DIR}/terrace/libterrace.a" "${PROJECT_BINARY_DIR}/yaml-cpp/libyaml-cpp.a" "${PROJECT_BINARY_DIR}/phylo-yaml/libphyloYAML.a" "${PROJECT_BINARY_DIR}/main/libmain.a")
+
+if (USE_CMAPLE_AA STREQUAL "ON")
+	target_link_libraries(iqtree3-aa pll ncl nclextra utils pda lbfgsb whtest sprng vectorclass model
+    	gsl alignment tree simulator terrace yaml-cpp phyloYAML main-aa maple-aa ${PLATFORM_LIB} ${STD_LIB} ${THREAD_LIB} ${ATOMIC_LIB})
+endif()
+
+# onnxruntime library
+if (USE_NN OR USE_OLD_NN)
+    if (onnxruntime_LIBRARIES)
+        target_link_libraries(iqtree3 ${onnxruntime_LIBRARIES})
+    else()
+        if (APPLE)
+            target_link_libraries(iqtree3 /usr/local/lib/libonnxruntime.dylib)
+        elseif(UNIX)
+            target_link_libraries(iqtree3 /usr/local/lib/libonnxruntime.so)
+        else()
+            target_link_libraries(iqtree3 onnxruntime)
+        endif()
+    endif()
+endif()
+
+if (USE_TERRAPHAST)
+   target_link_libraries(iqtree3 terracetphast)
+   LIST(APPEND STATIC_LIBS "${PROJECT_BINARY_DIR}/terracetphast/libterracetphast.a" "${PROJECT_BINARY_DIR}/terraphast/libterraphast.a")
+   if (USE_CMAPLE_AA STREQUAL "ON")
+		target_link_libraries(iqtree3-aa terracetphast)
+   endif()
+endif()
+
+if (USE_LSD2)
+    target_link_libraries(iqtree3 lsd2)
+    LIST(APPEND STATIC_LIBS "${PROJECT_BINARY_DIR}/lsd2/liblsd2.a")
+    if (USE_CMAPLE_AA STREQUAL "ON")
+    	target_link_libraries(iqtree3-aa lsd2)
+    endif()
+endif()
+
+if (NOT IQTREE_FLAGS MATCHES "nosse")
+    target_link_libraries(iqtree3 kernelsse)
+    LIST(APPEND STATIC_LIBS "${PROJECT_BINARY_DIR}/libkernelsse.a")
+    if (USE_CMAPLE_AA STREQUAL "ON")
+    	target_link_libraries(iqtree3-aa kernelsse)
+    endif()
+endif()
+
+# MPI libraries
+if (IQTREE_FLAGS MATCHES "mpi")
+    if (NOT CMAKE_CXX_COMPILER MATCHES "mpi")
+        target_link_libraries(iqtree3 ${MPI_CXX_LIBRARIES})
+        if (USE_CMAPLE_AA STREQUAL "ON")
+        	target_link_libraries(iqtree3-aa ${MPI_CXX_LIBRARIES})
+        endif()
+    endif()
+endif()
+
+# SSE, AVX etc. libraries
+if (NOT BINARY32 AND NOT IQTREE_FLAGS MATCHES "novx")
+    target_link_libraries(iqtree3 pllavx kernelavx kernelfma)
+    LIST(APPEND STATIC_LIBS "${PROJECT_BINARY_DIR}/pll/libpllavx.a" "${PROJECT_BINARY_DIR}/libkernelavx.a" "${PROJECT_BINARY_DIR}/libkernelfma.a")
+    if (USE_CMAPLE_AA STREQUAL "ON")
+    	target_link_libraries(iqtree3-aa pllavx kernelavx kernelfma)
+    endif()
+    if (IQTREE_FLAGS MATCHES "KNL")
+        target_link_libraries(iqtree3 kernelavx512)
+        LIST(APPEND STATIC_LIBS "${PROJECT_BINARY_DIR}/libkernelavx512.a")
+        if (USE_CMAPLE_AA STREQUAL "ON")
+        	target_link_libraries(iqtree3-aa kernelavx512)
+        endif()
+    endif()
+endif()
+
+# setup the executable name
+##################################################################
+set_target_properties(iqtree3 PROPERTIES OUTPUT_NAME "iqtree3${EXE_SUFFIX}")
+if (USE_CMAPLE_AA STREQUAL "ON")
+	set_target_properties(iqtree3-aa PROPERTIES OUTPUT_NAME "iqtree3-aa${EXE_SUFFIX}")
+endif()
+
+# strip the release build
+if (NOT IQTREE_FLAGS MATCHES "nostrip" AND CMAKE_BUILD_TYPE STREQUAL "Release" AND (GCC OR CLANG) AND NOT APPLE) # strip is not necessary for MSVC
+    if (WIN32)
+        ADD_CUSTOM_COMMAND(TARGET iqtree3 POST_BUILD COMMAND strip $<TARGET_FILE:iqtree3>)
+        if (USE_CMAPLE_AA STREQUAL "ON")
+        	ADD_CUSTOM_COMMAND(TARGET iqtree3-aa POST_BUILD COMMAND strip $<TARGET_FILE:iqtree3-aa>)
+        endif()
+    elseif (NOT APPLE)
+        ADD_CUSTOM_COMMAND(TARGET iqtree3 POST_BUILD COMMAND strip $<TARGET_FILE:iqtree3>)
+        if (USE_CMAPLE_AA STREQUAL "ON")
+        	ADD_CUSTOM_COMMAND(TARGET iqtree3-aa POST_BUILD COMMAND strip $<TARGET_FILE:iqtree3-aa>)
+        endif()
+    endif()
+endif()
+
+if (MSVC)
+    set (BINARY_DIR "${PROJECT_BINARY_DIR}/Release")
+else()
+    set (BINARY_DIR "${PROJECT_BINARY_DIR}")
+endif()
+
+if (NOT BUILD_LIB AND WIN32)
+    if (MSVC)
+        if (CLANG_UNDER_VS)
+            ADD_CUSTOM_COMMAND(TARGET iqtree3 POST_BUILD COMMAND copy "iqtree3${EXE_SUFFIX}.exe" "iqtree3${EXE_SUFFIX}-click.exe")
+            if (USE_CMAPLE_AA STREQUAL "ON")
+            	ADD_CUSTOM_COMMAND(TARGET iqtree3-aa POST_BUILD COMMAND copy "iqtree3-aa${EXE_SUFFIX}.exe" "iqtree3-aa${EXE_SUFFIX}-click.exe")
+            endif()
+        else()
+            ADD_CUSTOM_COMMAND(TARGET iqtree3 POST_BUILD COMMAND copy "Release\\iqtree3${EXE_SUFFIX}.exe" "Release\\iqtree3${EXE_SUFFIX}-click.exe")
+            if (USE_CMAPLE_AA STREQUAL "ON")
+            	ADD_CUSTOM_COMMAND(TARGET iqtree3-aa POST_BUILD COMMAND copy "Release\\iqtree3-aa${EXE_SUFFIX}.exe" "Release\\iqtree3-aa${EXE_SUFFIX}-click.exe")
+            endif()
+        endif()
+    else()
+        ADD_CUSTOM_COMMAND(TARGET iqtree3 POST_BUILD COMMAND copy "iqtree3${EXE_SUFFIX}.exe" "iqtree3${EXE_SUFFIX}-click.exe")
+        if (USE_CMAPLE_AA STREQUAL "ON")
+        	ADD_CUSTOM_COMMAND(TARGET iqtree3-aa POST_BUILD COMMAND copy "iqtree3-aa${EXE_SUFFIX}.exe" "iqtree3-aa${EXE_SUFFIX}-click.exe")
+        endif()
+    endif()
+endif()
+
+##############################################################
+# CREATE A STATIC LIBRARY
+##############################################################
+
+if (BUILD_LIB)
+    if(APPLE)
+        add_custom_command(
+            TARGET iqtree3 POST_BUILD
+            COMMAND libtool -static -o libiqtree.a ${STATIC_LIBS}
+            COMMAND rm libiqtree3.a
+            VERBATIM)
+    elseif(UNIX)
+        add_custom_command(
+            TARGET iqtree3 POST_BUILD
+            COMMAND mkdir all_libs
+            COMMAND ln -s ${STATIC_LIBS} all_libs
+            COMMAND ${PROJECT_SOURCE_DIR}/test_scripts/unify-static-libs.sh libiqtree.a all_libs
+            COMMAND rm -rf all_libs
+            COMMAND rm libiqtree3.a
+            VERBATIM)
+    elseif(WIN32)
+        add_custom_command(
+            TARGET iqtree3 POST_BUILD
+            COMMAND ${PROJECT_SOURCE_DIR}/test_scripts/unify-static-libs.bat ${STATIC_LIBS}
+            COMMAND ${CMAKE_COMMAND} -E rm -f libiqtree3.a
+            COMMAND ${PROJECT_SOURCE_DIR}/test_scripts/make-dll-lib.bat ${PROJECT_SOURCE_DIR}/test_scripts/bridge.cpp
+            VERBATIM)
+    endif()
+endif()
+
+##############################################################
+# add the install targets
+##############################################################
+install (TARGETS iqtree3 DESTINATION bin)
+if (USE_CMAPLE_AA STREQUAL "ON")
+	install (TARGETS iqtree3-aa DESTINATION bin)
+endif()
+install (FILES "${PROJECT_SOURCE_DIR}/example/models.nex" DESTINATION .)
+install (FILES "${PROJECT_SOURCE_DIR}/example/example.phy" DESTINATION .)
+install (FILES "${PROJECT_SOURCE_DIR}/example/example.nex" DESTINATION .)
+install (FILES "${PROJECT_SOURCE_DIR}/example/example.cf" DESTINATION .)
+
+if (WIN32)
+    install (FILES "${BINARY_DIR}/iqtree3${EXE_SUFFIX}-click.exe" DESTINATION bin)
+    if (USE_CMAPLE_AA STREQUAL "ON")
+    	install (FILES "${BINARY_DIR}/iqtree3-aa${EXE_SUFFIX}-click.exe" DESTINATION bin)
+    endif()
+    if (NOT IQTREE_FLAGS MATCHES "single" AND MSVC)
+        install(FILES  "${PROJECT_SOURCE_DIR}/lib/pthreadVC2.dll" DESTINATION bin)
+        install(FILES  "${PROJECT_SOURCE_DIR}/lib/libiomp5md.dll" DESTINATION bin)
+    endif()
+
+    if (NOT IQTREE_FLAGS MATCHES "single" AND CLANG)
+        install(FILES  "${PROJECT_SOURCE_DIR}/lib/libiomp5md.dll" DESTINATION bin)
+    endif()
+
+endif()
+
+##############################################################
+# build a CPack driven installer package
+##############################################################
+include (InstallRequiredSystemLibraries)
+set (CPACK_RESOURCE_FILE_LICENSE
+     "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+set (CPACK_PACKAGE_VERSION_MAJOR "${iqtree_VERSION_MAJOR}")
+set (CPACK_PACKAGE_VERSION_MINOR "${iqtree_VERSION_MINOR}")
+set (CPACK_PACKAGE_VERSION_PATCH "${iqtree_VERSION_PATCH}")
+if(WIN32 OR APPLE)
+  set(CPACK_GENERATOR "ZIP")
+  set(CPACK_SOURCE_GENERATOR "ZIP")
+else()
+  set(CPACK_GENERATOR "TGZ")
+  set(CPACK_SOURCE_GENERATOR "TGZ")
+endif()
+
+#set(CPACK_SOURCE_PACKAGE_FILE_NAME
+#  "${CMAKE_PROJECT_NAME}-${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}")
+set(CPACK_SOURCE_IGNORE_FILES
+  "/build.*/;/debug.*/;/examples/;/test_scripts/;/manual/;/.bzr/;~$;/\\\\.svn/;/\\\\.git/;/pllrepo/;${CPACK_SOURCE_IGNORE_FILES}")
+
+set (SYSTEM_NAME "${CMAKE_SYSTEM_NAME}")
+if (${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
+    if (IQTREE_FLAGS MATCHES "oldmac")
+        set (SYSTEM_NAME "macOS10.5")
+    elseif (OSX_NATIVE_ARCHITECTURE STREQUAL "arm64")
+        set (SYSTEM_NAME "macOS-arm")
+    else()
+        set (SYSTEM_NAME "macOS-intel")
+    endif()
+endif()
+
+if (NOT APPLE AND UNIX)
+    if (__ARM_NEON)
+        set (SYSTEM_NAME "Linux-arm")
+    else()
+        set (SYSTEM_NAME "Linux-intel")
+    endif()
+endif()
+
+if (IQTREE_FLAGS MATCHES "KNL")
+    set (SYSTEM_NAME "${SYSTEM_NAME}KNL")
+endif()
+
+set(CPACK_PACKAGE_FILE_NAME
+    "${CMAKE_PROJECT_NAME}${EXE_SUFFIX}-${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}${CPACK_PACKAGE_VERSION_PATCH}-${SYSTEM_NAME}")
+
+if (NOT APPLE)
+    set(CPACK_STRIP_FILES TRUE)
+endif()
+
+include (CPack)
+
+#add_custom_target(dist COMMAND ${CMAKE_MAKE_PROGRAM} package_source)
