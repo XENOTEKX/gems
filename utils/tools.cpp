@@ -7679,11 +7679,7 @@ void Params::setDefault() {
     print_branch_lengths = false;
     lh_mem_save = LM_PER_NODE; // auto detect
     buffer_mem_save = false;
-    // Default start tree: IQ-TREE's own parsimony (STT_PARSIMONY), not PLL. PLL builds the 98 candidate parsimony
-    // trees SERIALLY on one core with SPR refinement (sprDist=6); IQ-TREE's computeParsimonyTree runs them in parallel
-    // (OpenMP) with bit-packed Fitch and no SPR -> measured ~16x faster @100k, ~19x @1M (212.7s vs PLL 4032.96s),
-    // reaching the IDENTICAL final ML lnL (parsimony only seeds ML search). Was STT_PLL_PARSIMONY. (2026-06-28)
-    start_tree = STT_PARSIMONY;
+    start_tree = STT_PLL_PARSIMONY;
     start_tree_subtype_name = StartTree::Factory::getNameOfDefaultTreeBuilder();
 
     modelfinder_ml_tree = true;
