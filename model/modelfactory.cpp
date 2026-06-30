@@ -17,7 +17,7 @@
  *   Free Software Foundation, Inc.,                                       *
  *   59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.             *
  ***************************************************************************/
-#include <cmath>          // G.4.2: std::isnan for the JOLT eligibility/fallback check
+#include <cmath>          // std::isnan for the JOLT eligibility/fallback check
 #include "rateinvar.h"
 #include "modelfactory.h"
 #include "rategamma.h"
@@ -1368,13 +1368,11 @@ double ModelFactory::optimizeAllParameters(double gradient_epsilon) {
 double ModelFactory::optimizeParametersGammaInvar(int fixed_len, bool write_info, double logl_epsilon, double gradient_epsilon) {
     if (!site_rate->isGammai() || site_rate->isFixPInvar() || site_rate->isFixGammaShape() || site_rate->getTree()->aln->frac_const_sites == 0.0 || model->isMixture())
         return optimizeParameters(fixed_len, write_info, logl_epsilon, gradient_epsilon);
-    // G.4.3c — number of +I+G restart points. The multi-start (the loop below) exists to escape the pinv<->alpha
-    // ridge: it seeds the optimiser from initPInv = MIN_PINVAR .. frac_const in (n_pinv_starts-1) equal steps and
-    // keeps the best. CPU default = 10. Under --jolt, JOLT joint-optimises (branches+alpha+pinv) and is reliable
-    // for SMALL pinv moves but STALLS on large pinv travel (MEASURED, job 170579044: single-start from pinv=0.25
-    // stalled at 0.457, 39.5 nat below the true pinv=0.50 optimum). So full single-start is UNSAFE — but ~4
-    // spanning starts suffice (one always lands near any optimum and JOLT polishes it locally), cutting the +I
-    // cost ~2.5× while preserving robustness. Validated 4-start == 10-start MLE on collapsed AND high-pinv data.
+    // Number of +I+G restart points. The multi-start loop below escapes the pinv-alpha ridge: it seeds the
+    // optimiser from initPInv = MIN_PINVAR .. frac_const in (n_pinv_starts-1) equal steps and keeps the best.
+    // CPU default is 10. Under --jolt, JOLT joint-optimises branches, alpha and pinv reliably for small pinv
+    // moves but stalls on large pinv travel, so a single start is unsafe; 4 spanning starts suffice (one always
+    // lands near the optimum and JOLT polishes it locally) and give the same MLE as 10 starts.
     int n_pinv_starts = 10;
 #ifdef IQTREE_GPU
     {
@@ -1418,7 +1416,7 @@ double ModelFactory::optimizeParametersGammaInvar(int fixed_len, bool write_info
     double bestAlpha = 0.0;
     double bestPInvar = 0.0;
 
-    double testInterval = (frac_const - MIN_PINVAR * 2) / (double)(n_pinv_starts - 1);  // G.4.3c: n_pinv_starts points (CPU 10; --jolt 4)
+    double testInterval = (frac_const - MIN_PINVAR * 2) / (double)(n_pinv_starts - 1);  // n_pinv_starts points (CPU 10; --jolt 4)
     double initPInv = MIN_PINVAR;
     double initAlpha = site_rate->getGammaShape();
 
@@ -1589,20 +1587,19 @@ double ModelFactory::optimizeParameters(int fixed_len, bool write_info,
     ASSERT(tree);
 
 #ifdef IQTREE_GPU
-    // Phase G.4.2 — GPU JOLT joint-gradient optimiser. For JOLT-eligible candidates (fixed-Q reversible model,
-    // ns in {4,20}, no +I, gamma-or-uniform) replace the per-edge Gauss-Seidel branch-opt + alpha-Brent loop with
-    // a single joint LM step over (all branches + alpha) on the GPU. optimizeParametersJOLT() writes the result
-    // back through the cache-invalidating setters and self-checks vs a fresh CPU computeLikelihood; it returns NaN
-    // for ineligible regimes / CUDA errors, in which case we fall through to the standard CPU path below.
+    // GPU JOLT joint-gradient optimiser. For JOLT-eligible candidates (fixed-Q reversible model, ns in {4,20},
+    // no +I, gamma-or-uniform) replace the per-edge Gauss-Seidel branch-opt + alpha-Brent loop with a single
+    // joint LM step over (all branches + alpha) on the GPU. optimizeParametersJOLT() writes the result back
+    // through the cache-invalidating setters and self-checks against a fresh CPU computeLikelihood; it returns
+    // NaN for ineligible regimes or CUDA errors, in which case we fall through to the standard CPU path below.
     if (tree->params && tree->params->jolt) {
         ModelSubst *jm = tree->getModel();
         if (jm && jm->getNMixtures() > 1) {
-            // G.8.2.2: the host-driven profile-mixture optimiser (optimizeParametersJOLTMix) is CORRECT but
-            // launch-latency-bound — validated job 171697527: it engages and monotone-converges to the fixed-weight
-            // optimum, but at ~4.4 s/outer on a 400-site alignment (per-tree-node kernel launches + a host echild
-            // rebuild + re-upload every sweep). It is therefore a correctness REFERENCE, gated OFF by default until
-            // the device-resident mixture optimiser (gpu_jolt_optimize_mix) lands. Opt in with JOLT_MIX_HOSTDRIVEN=1;
-            // without the flag, mixtures fall through to the (fast) CPU path below.
+            // The host-driven profile-mixture optimiser (optimizeParametersJOLTMix) is correct but
+            // launch-latency-bound: it converges monotonically to the fixed-weight optimum, but slowly
+            // (per-tree-node kernel launches plus a host echild rebuild and re-upload every sweep). It serves as
+            // a reference and is off by default until the device-resident mixture optimiser lands. Opt in with
+            // JOLT_MIX_HOSTDRIVEN=1; without the flag, mixtures fall through to the fast CPU path below.
             if (getenv("JOLT_MIX_HOSTDRIVEN")) {
                 double jolt_lh = tree->optimizeParametersJOLTMix(fixed_len);
                 if (!std::isnan(jolt_lh))

@@ -2369,7 +2369,7 @@ public:
 
     /** number of MPI ranks sharing each physical node during ModelFinder;
      *  used to partition OMP thread budget: rank_threads = num_threads / mpi_ranks_per_node.
-     *  Default 1 (each rank owns the full node — the xlarge 1-rank/node case). */
+     *  Default 1 (each rank owns the full node). */
     int mpi_ranks_per_node;
 
     /** either MTC_AIC, MTC_AICc, MTC_BIC */
@@ -2915,14 +2915,14 @@ public:
 
     /**
      *  TRUE to run the GPU path / GPU diagnostic (set by --gpu or -gpu).
-     *  Phase G.1+ in-tree CUDA ModelFinder offload; default false.
+     *  Enables the in-tree CUDA ModelFinder offload; default false.
      */
     bool gpu;
 
     /**
      *  TRUE to use the GPU JOLT joint-gradient optimiser (set by --jolt; requires --gpu).
-     *  Phase G.4.2: replaces IQ-TREE's per-edge Gauss-Seidel branch-opt + alpha-Brent with a single
-     *  joint LM diagonal-Newton step over (all branches + alpha) for JOLT-eligible candidates
+     *  Replaces the per-edge Gauss-Seidel branch-opt + alpha-Brent with a single joint LM
+     *  diagonal-Newton step over (all branches + alpha) for JOLT-eligible candidates
      *  (fixed-Q reversible model, ns in {4,20}, no +I, gamma-only or no rate het). Default false.
      */
     bool jolt;
@@ -2954,101 +2954,97 @@ public:
     /** TRUE to emit the TS-DIAG tree-search phase/counter breakdown (set by --ts-diag). Default false. */
     bool ts_diag;
 
-    /** TRUE to emit the TS-REOPT-SPLIT nni5-reopt-vs-screener (B6) stats (set by --ts-reopt-split).
+    /** TRUE to emit the nni5-reopt-vs-screener stats (set by --ts-reopt-split).
         Adds one extra per-NNI-move likelihood eval; result-invariant; off by default. */
     bool ts_reopt_split;
 
-    /** TRUE to emit JOLT-DIAG-HOST/CU host-rebuild-cost timing for optimizeParametersJOLT (set by
-        --jolt-diag; A3). Also exports env JOLT_DIAG so the CUDA TU can gate the echild tax timer.
-        Result-invariant (timers + printf only); off by default. */
+    /** TRUE to emit host-rebuild-cost timing for optimizeParametersJOLT (set by --jolt-diag). Also exports
+        env JOLT_DIAG so the CUDA TU can gate the echild timer. Result-invariant (timers + printf only);
+        off by default. */
     bool jolt_diag;
 
-    /** TRUE to cross-check the GPU clean-room screener lnL vs the CPU pre-reopt score per NNI move
-        (set by --ts-screen-check; TS.2 Increment 1; implies --ts-reopt-split; GPU build only).
+    /** TRUE to cross-check the GPU reference screener lnL against the CPU pre-reopt score per NNI move
+        (set by --ts-screen-check; implies --ts-reopt-split; GPU build only).
         Adds a stateless GPU lnL call per scored move; off by default. */
     bool ts_screen_check;
 
-    /** TRUE to cross-check the NON-MUTATING GPU screener (gpuScreenNNICleanRoom: score the swapped
-        topology @ OLD lengths from the UNMUTATED tree via descriptor re-pointing) vs the CPU pre-reopt
-        oracle AND vs the in-situ post-swap GPU helper (set by --ts-screen2-check; TS.2 Increment 2;
+    /** TRUE to cross-check the non-mutating GPU screener (gpuScreenNNICleanRoom: score the swapped
+        topology at old lengths from the unmutated tree via descriptor re-pointing) against the CPU
+        pre-reopt score and against the in-situ post-swap GPU helper (set by --ts-screen2-check;
         implies --ts-reopt-split; GPU build only). Off by default. */
     bool ts_screen2_check;
 
-    /** TRUE to cross-check the RESIDENT-POSTORDER + RE-PAIRING-FOLD screener (gpuScreenNNIFoldCleanRoom) vs the
-        trusted I2 swap-aware oracle gpuScreenNNICleanRoom per NNI move (set by --ts-screen3-check; TS.2
-        Increment 3a; implies --ts-reopt-split; GPU build only). Off by default. */
+    /** TRUE to cross-check the resident-postorder re-pairing-fold screener (gpuScreenNNIFoldCleanRoom)
+        against the swap-aware screener gpuScreenNNICleanRoom per NNI move (set by --ts-screen3-check;
+        implies --ts-reopt-split; GPU build only). Off by default. */
     bool ts_screen3_check;
 
-    /** TRUE to run the PERSISTENT-UPPER preorder validator once per tree search (set by --ts-upper-check; TS.2
-        Increment 3b-i; GPU build only). Checks every internal edge's lnL == the whole-tree lnL. Does NOT imply
-        --ts-reopt-split (the tree lnL is its own oracle — no CPU pre-reopt needed). Off by default. */
+    /** TRUE to run the persistent-upper preorder validator once per tree search (set by --ts-upper-check;
+        GPU build only). Checks every internal edge's lnL == the whole-tree lnL. Does NOT imply
+        --ts-reopt-split (the tree lnL is its own reference, so no CPU pre-reopt is needed). Off by default. */
     bool ts_upper_check;
 
-    /** TRUE to run the BATCHED re-pairing NNI screener once per tree search (set by --ts-batch-check; TS.2
-        Increment 3b-ii; GPU build only). Scores every inner branch's 2 moves off ONE shared sweep, cross-checks
-        each vs the 3a oracle, and times the batch vs M per-move oracle calls. Off by default. */
+    /** TRUE to run the batched re-pairing NNI screener once per tree search (set by --ts-batch-check;
+        GPU build only). Scores every inner branch's 2 moves off one shared sweep, cross-checks each against
+        the per-move screener, and times the batch against M per-move calls. Off by default. */
     bool ts_batch_check;
 
-    /** TRUE to run the PATTERN-TILED batched NNI screener once per tree search (set by --ts-tile-check; TS.2
-        Increment 3c; GPU build only). Tiles nptn so the persistent per-node upper fits at AA-1M; auto-picks nTile
-        from free VRAM. Gates tiled==3a oracle (1e-9) at all scales + bit-identity to nTile=1 at example scale.
-        Off by default. */
+    /** TRUE to run the pattern-tiled batched NNI screener once per tree search (set by --ts-tile-check;
+        GPU build only). Tiles nptn so the persistent per-node upper fits large alignments; auto-picks nTile
+        from free VRAM. Cross-checks the tiled result against the per-move screener at all scales and against
+        nTile=1 for bit-identity. Off by default. */
     bool ts_tile_check;
 
-    /** TRUE to drive the NNI search front-end with the GPU screener (set by --ts-screen-drive; TS.2 Integration
-        Step 1; GPU build only). Runs the lean per-round screener (gpuScreenNNIRank) as a PURE SIDE-VALIDATOR:
-        the CPU branch-iteration order is preserved and the screener ranking is DISCARDED, so the search trajectory
-        is BYTE-IDENTICAL to the CPU baseline. Per round it asserts the CPU winner preloglh == one of the GPU's 2
-        swap lnLs (TS-DRIVE pass@1e-9). Implies ts_reopt_split (so getBestNNIForBran populates preloglh). The
-        ranking is wired but not consumed until ts_screen_topk>0 (Step 2). Off by default. */
+    /** TRUE to drive the NNI search front-end with the GPU screener (set by --ts-screen-drive; GPU build
+        only). Runs the lean per-round screener (gpuScreenNNIRank) only as a side-validator: the CPU
+        branch-iteration order is preserved and the screener ranking is discarded, so the search trajectory
+        stays byte-identical to the CPU baseline. Per round it asserts the CPU winner preloglh == one of the
+        GPU's 2 swap lnLs. Implies ts_reopt_split (so getBestNNIForBran populates preloglh). The ranking is
+        wired but not consumed until ts_screen_topk>0. Off by default. */
     bool ts_screen_drive;
 
-    /** TS.2 Integration Step 2 (GPU build): if >0, exact-refine (nni5) only the top-k branches by GPU screener
-        score; skip the rest (assumed non-positive). The search trajectory may then DIFFER from CPU (gated by
-        end-to-end final lnL within 0.5 + recall@k >= 0.95, not byte-identity). 0 = disabled (Step 1 only). */
+    /** If >0 (GPU build), exact-refine (nni5) only the top-k branches by GPU screener score and skip the
+        rest (assumed non-positive). The search trajectory may then differ from CPU, so this is gated on the
+        final lnL and recall, not byte-identity. 0 = disabled (side-validator only). */
     int ts_screen_topk;
 
-    /** TS.2 ADAPTIVE-K (GPU build): phase-aware top-k. When true, K is chosen PER ROUND from the screener's own
-        exact scores: K = #{branches whose best old-length swap > curScore - ts_adaptive_delta}, clamped to
-        [ts_adaptive_kmin, ts_adaptive_kmax]. After a perturbation many branches improve => K rises (recovery
-        breadth, preserves the escape phase); near convergence few do => K shrinks (cheap). Fixes flat small-K
-        starving post-perturbation recovery. ts_adaptive_kmax<=0 means "all branches". Off by default. */
+    /** Phase-aware top-k (GPU build). When true, K is chosen per round from the screener's own exact
+        scores: K = #{branches whose best old-length swap > curScore - ts_adaptive_delta}, clamped to
+        [ts_adaptive_kmin, ts_adaptive_kmax]. After a perturbation many branches improve so K rises (recovery
+        breadth); near convergence few do so K shrinks. ts_adaptive_kmax<=0 means all branches. Off by default. */
     bool ts_screen_adaptive;
     int ts_adaptive_kmin;
     int ts_adaptive_kmax;
     double ts_adaptive_delta;
 
-    /** TS.1 (reborn / L1, GPU build): replace the post-NNI CPU optimizeAllBranches(1) (the optallbranches 19.5%
-        surface) with a lean in-loop JOLT all-branch reopt (optimizeAllBranchesJOLT -> brlen-only gpu_jolt_optimize,
-        lean tail: NO clearAllPartialLH+CPU self-check). NaN -> CPU fallback. NOT bit-exact (JOLT converges harder than
-        a single CPU sweep) -> gated on quality, not byte-identity. The coherence keystone for the FUSED loop (TS.6).
-        Off by default. */
+    /** Replace the post-NNI CPU optimizeAllBranches(1) with a lean in-loop JOLT all-branch reopt (GPU build;
+        optimizeAllBranchesJOLT -> brlen-only gpu_jolt_optimize, lean tail: no clearAllPartialLH or CPU
+        self-check). NaN -> CPU fallback. Not bit-exact (JOLT converges harder than a single CPU sweep), so
+        it is gated on quality, not byte-identity. Off by default. */
     bool ts_jolt_allbr;
 
-    /** TS.6 SHADOW falsification (--ts-shadow, CPU-only, build-gpu-off): COMMIT TS.6's selection rule — apply the
-        compatible node-disjoint OLD-LENGTH-positive (preloglh>cur) subset TOPOLOGY-ONLY, then ONE global
-        optimizeAllBranches reopt (the JOLT stand-in), round-level accept/rollback + single-best nni5 fallback —
-        so the final tree is a true TS.6 counterfactual. Falsifies red-team FM-5 (TS.6 drops nni5 "late-bloomers"
-        -> worse tree on escape-load-bearing data) BEFORE building TS.6. Implies ts_reopt_split + TS_CLEAN_PRE
-        (pristine old-length scores). ts_shadow_converge uses optimizeAllBranches(100) to bracket JOLT's converged
-        reopt strength (the single-sweep stand-in is otherwise pessimistic). Does NOT test FM-1 (GPU geometry).
-        Off by default. */
+    /** Apply the fused selection rule on the CPU path for validation (--ts-shadow, CPU-only build): apply the
+        compatible node-disjoint old-length-positive (preloglh>cur) subset topology-only, then one global
+        optimizeAllBranches reopt as a JOLT stand-in, with round-level accept/rollback and a single-best nni5
+        fallback, so the final tree matches what the fused loop would produce. Implies ts_reopt_split and
+        TS_CLEAN_PRE (pristine old-length scores). ts_shadow_converge uses optimizeAllBranches(100) to bracket
+        JOLT's converged reopt strength (the single-sweep stand-in is otherwise pessimistic). Off by default. */
     bool ts_shadow;
     bool ts_shadow_converge;
 
-    /** LBR G1 measurement (--ts-lbr-measure, read-only): rides the --ts-shadow apply path to measure, per
-        accepted NNI round, the fraction of branches whose optimal length actually moves (>delta) during the
-        all-branch reopt, bucketed by graph distance to the nearest applied NNI. PURELY READ-ONLY (only calls
-        saveBranchLengths + reads neighbors/ids; never mutates lengths/partials/score), gated so production
+    /** Read-only branch-movement measurement (--ts-lbr-measure): rides the --ts-shadow apply path to measure,
+        per accepted NNI round, the fraction of branches whose optimal length actually moves (>delta) during the
+        all-branch reopt, bucketed by graph distance to the nearest applied NNI. Read-only (only calls
+        saveBranchLengths and reads neighbors/ids; never mutates lengths/partials/score), gated so production
         builds stay byte-identical. Sets ts_reopt_split (for getBestNNIForBran preloglh); does NOT imply
-        ts_shadow — the canonical run is `--ts-shadow --ts-lbr-measure`. Off by default. */
+        ts_shadow (the usual run is `--ts-shadow --ts-lbr-measure`). Off by default. */
     bool ts_lbr_measure;
 
-    /** TS.6 FUSED loop (GPU): replace per-move nni5 with screener-positive selection + ONE global optimizeAllBranchesJOLT.
-        --ts-fused-check = VALIDATION-ONLY (proves enumerateNNIGeometry + the screener mi==cnt mapping per branch via
-        indexed g[cnt]==preloglh[cnt]; applies NOTHING, trajectory byte-identical = the FM-1 gate). --ts-fused = the
-        production fused apply (Increment 2). ts_fused_nni5_topm M = HYBRID: still run exact nni5 on the top-M screener
-        branches to catch late-bloomers (red-team FM-5), fused-apply the rest; 0 = pure fused. Off by default. */
+    /** Fused NNI loop (GPU): replace per-move nni5 with screener-positive selection plus one global
+        optimizeAllBranchesJOLT. --ts-fused-check validates only (proves enumerateNNIGeometry and the screener
+        mapping per branch via indexed g[cnt]==preloglh[cnt]; applies nothing, trajectory byte-identical).
+        --ts-fused is the production fused apply. ts_fused_nni5_topm M still runs exact nni5 on the top-M
+        screener branches to catch late-bloomers and fused-applies the rest; 0 = pure fused. Off by default. */
     bool ts_fused;
     bool ts_fused_check;
     int  ts_fused_nni5_topm;
