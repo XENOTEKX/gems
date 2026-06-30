@@ -217,7 +217,7 @@ __global__ void k2_derv_mix(int ns, int nptn, int R,
 }
 
 // A3 (screener +I): the +I variant of k2_derv_mix — adds the branch/topology-INDEPENDENT invariant term
-// pinv*baseinvar[ptn] to the per-pattern likelihood before log (mirrors kj_derv_fused vs kj_derv). The screener's
+// pinv*baseinvar[ptn] to the per-pattern likelihood before log (mirrors kj_derv_fused). The screener's
 // catRate/catProp already carry the 1/(1-pinv) rescale (getRate/getProp for RateGammaInvar), so this additive term
 // is the ONLY missing +I piece. Used by the screener move loop ONLY when pinv>0; pinv==0 stays on k2_derv_mix
 // (bit-identical), so non-+I screening is UNCHANGED. baseinvar is the chunk slice (indexed 0..nptn-1 of the chunk).
@@ -235,109 +235,6 @@ __global__ void k2_derv_mix_inv(int ns, int nptn, int R,
     }
     double Lp=fabs(lh)+pinv*baseinvar[ptn]; double inv=1.0/Lp, rr=d1*inv;
     pdf[ptn]=rr; pddf[ptn]=d2*inv-rr*rr; patlh[ptn]=log(Lp);
-}
-
-// ============================================================================================================
-// TS RAKE BATCH (2026-06-29) — batched per-move screener folds. Each kernel is the CHARACTER-EXACT twin of its
-// serial counterpart (k1_node / kj_pre_node(eigOut=1) / k2_derv_mix) with only (a) a blockIdx.y move selector that
-// resolves per-move device pointers from the int descriptor arrays EXACTLY as the host ecP/plP/tpP lambdas do, and
-// (b) a per-local-move output slot j*slotSz. The per-thread arithmetic + accumulation order are unchanged => each
-// output double is bit-identical to the serial fold for that move; only the LAUNCH is collapsed (nB moves in one
-// grid (GB,nB) that fills the SMs vs nB tiny under-occupied launches). m = batchStart + blockIdx.y. slotSz = the
-// chunk eigen slot = ncat*ns*Pn (same stride d_partial/d_upper/n1eig/n2eig all use). Gated JOLT_TS_BATCHFOLD.
-// ============================================================================================================
-__global__ void screen_node2_batch(int ns, int nptn, int ncat, int batchStart,
-        double* __restrict__ out, size_t slotSz,
-        const double* __restrict__ d_echild, size_t ecStride,
-        const double* __restrict__ d_partial, const unsigned char* __restrict__ d_tip,
-        const int* __restrict__ n2a_ec, const int* __restrict__ n2a_slot, const int* __restrict__ n2a_leaf,
-        const int* __restrict__ n2b_ec, const int* __restrict__ n2b_slot, const int* __restrict__ n2b_leaf) {
-    int j = blockIdx.y; int m = batchStart + j;
-    int ptn = blockIdx.x*blockDim.x + threadIdx.x; if (ptn>=nptn) return;
-    const double* ec0=(n2a_ec[m]>=0)? d_echild+(size_t)n2a_ec[m]*ecStride:nullptr;
-    const double* p0 =(n2a_slot[m]>=0)? d_partial+(size_t)n2a_slot[m]*slotSz:nullptr;
-    const unsigned char* t0=(n2a_leaf[m]>=0)? d_tip+(size_t)n2a_leaf[m]*nptn:nullptr;
-    const double* ec1=(n2b_ec[m]>=0)? d_echild+(size_t)n2b_ec[m]*ecStride:nullptr;
-    const double* p1 =(n2b_slot[m]>=0)? d_partial+(size_t)n2b_slot[m]*slotSz:nullptr;
-    const unsigned char* t1=(n2b_leaf[m]>=0)? d_tip+(size_t)n2b_leaf[m]*nptn:nullptr;
-    double* o_base = out + (size_t)j*slotSz;
-    for (int c=0;c<ncat;c++){                                    // == k1_node(isRoot=0,nchild=2) body
-        double prod[NS_MAX]; for (int x=0;x<ns;x++) prod[x]=1.0;
-        accum_child(prod,ns,c,ptn,nptn,ec0,p0,t0);
-        accum_child(prod,ns,c,ptn,nptn,ec1,p1,t1);
-        double* o = o_base + (size_t)(c*ns)*nptn + ptn;
-        for (int r=0;r<ns;r++){ double v=0.0;
-            for (int x=0;x<ns;x++) v += g_Uinv[r*ns+x]*prod[x];
-            o[(size_t)r*nptn]=v; }
-    }
-}
-__global__ void screen_node1_batch(int ns, int nptn, int ncat, int batchStart,
-        double* __restrict__ out, size_t slotSz,
-        const double* __restrict__ d_echild, size_t ecStride,
-        const double* __restrict__ d_partial, const unsigned char* __restrict__ d_tip,
-        const double* __restrict__ d_upper, const double* __restrict__ d_pmat,
-        const int* __restrict__ mv_u, const int* __restrict__ mv_uIsRoot,
-        const int* __restrict__ n1a_ec, const int* __restrict__ n1a_slot, const int* __restrict__ n1a_leaf,
-        const int* __restrict__ n1b_ec, const int* __restrict__ n1b_slot, const int* __restrict__ n1b_leaf) {
-    int j = blockIdx.y; int m = batchStart + j;
-    int ptn = blockIdx.x*blockDim.x + threadIdx.x; if (ptn>=nptn) return;
-    double* o_base = out + (size_t)j*slotSz;
-    const double* ec0=(n1a_ec[m]>=0)? d_echild+(size_t)n1a_ec[m]*ecStride:nullptr;
-    const double* p0 =(n1a_slot[m]>=0)? d_partial+(size_t)n1a_slot[m]*slotSz:nullptr;
-    const unsigned char* t0=(n1a_leaf[m]>=0)? d_tip+(size_t)n1a_leaf[m]*nptn:nullptr;
-    if (mv_uIsRoot[m]) {                                         // u==root: == k1_node(isRoot=0,nchild=2) body
-        const double* ec1=(n1b_ec[m]>=0)? d_echild+(size_t)n1b_ec[m]*ecStride:nullptr;
-        const double* p1 =(n1b_slot[m]>=0)? d_partial+(size_t)n1b_slot[m]*slotSz:nullptr;
-        const unsigned char* t1=(n1b_leaf[m]>=0)? d_tip+(size_t)n1b_leaf[m]*nptn:nullptr;
-        for (int c=0;c<ncat;c++){
-            double prod[NS_MAX]; for (int x=0;x<ns;x++) prod[x]=1.0;
-            accum_child(prod,ns,c,ptn,nptn,ec0,p0,t0);
-            accum_child(prod,ns,c,ptn,nptn,ec1,p1,t1);
-            double* o = o_base + (size_t)(c*ns)*nptn + ptn;
-            for (int r=0;r<ns;r++){ double v=0.0;
-                for (int x=0;x<ns;x++) v += g_Uinv[r*ns+x]*prod[x];
-                o[(size_t)r*nptn]=v; }
-        }
-    } else {                                                     // interior u: == kj_pre_node(eigOut=1,nsib=1) body
-        int u = mv_u[m];
-        const double* up_uu = d_upper + (size_t)u*slotSz;
-        const double* Pmat_u = d_pmat + (size_t)u*ecStride;
-        for (int c=0;c<ncat;c++){
-            double fsib[NS_MAX]; for (int x=0;x<ns;x++) fsib[x]=1.0;
-            accum_child(fsib,ns,c,ptn,nptn,ec0,p0,t0);
-            const double* uuc = up_uu + (size_t)(c*ns)*nptn + ptn;
-            const double* Pc  = Pmat_u + (size_t)c*ns*ns;
-            double rr[NS_MAX];
-            for (int x=0;x<ns;x++){ double v=0.0;
-                for (int t=0;t<ns;t++) v += Pc[x*ns+t]*uuc[(size_t)t*nptn];
-                rr[x] = v*fsib[x]; }
-            double* o = o_base + (size_t)(c*ns)*nptn + ptn;
-            for (int jj=0;jj<ns;jj++){ double v=0.0;
-                for (int x=0;x<ns;x++) v += g_Uinv[jj*ns+x]*rr[x];
-                o[(size_t)jj*nptn]=v; }
-        }
-    }
-}
-__global__ void screen_k2_batch(int ns, int nptn, int ncat, int batchStart,
-        const double* __restrict__ n1_all, const double* __restrict__ n2_all, size_t slotSz,
-        const double* __restrict__ d_valall, double* __restrict__ patlh_all,
-        int useInv, double pinv, const double* __restrict__ baseinvar) {
-    int j = blockIdx.y; int m = batchStart + j;
-    int ptn = blockIdx.x*blockDim.x + threadIdx.x; if (ptn>=nptn) return;
-    const double* node_eig = n1_all + (size_t)j*slotSz;          // == k2_derv_mix(R=ncat) body (lh channel only)
-    const double* dad_eig  = n2_all + (size_t)j*slotSz;
-    const double* dval0 = d_valall + (size_t)m*3*ncat*ns;
-    const double* dval1 = dval0 + ncat*ns; const double* dval2 = dval0 + 2*ncat*ns;
-    double lh=0.0, d1=0.0, d2=0.0;
-    for (int r=0;r<ncat;r++) for (int x=0;x<ns;x++){
-        size_t o=(size_t)(r*ns+x)*nptn+ptn;
-        double th=node_eig[o]*dad_eig[o]; int k=r*ns+x;
-        lh+=dval0[k]*th; d1+=dval1[k]*th; d2+=dval2[k]*th;       // d1/d2 mirror the serial loop (dead here) so lh's order is identical
-    }
-    (void)d1; (void)d2;
-    double* patlh = patlh_all + (size_t)j*nptn;
-    if (useInv) { double Lp=fabs(lh)+pinv*baseinvar[ptn]; patlh[ptn]=log(Lp); }      // == k2_derv_mix_inv
-    else        { patlh[ptn]=log(fabs(lh)); }                                        // == k2_derv_mix
 }
 
 // G.8.1b — LEAF endpoint eigen partial for mixtures (per-class). Regime r=m*ncat+c: L[r][i] = Uinv_m[i][s]
@@ -404,31 +301,7 @@ __global__ void k7_pre_mix(int ns, int nptn, int ncat, int nmix,
 }
 
 // =============================== G.4.2 JOLT kernels (ported from gpu_k8b_jolt_alpha.cu, runtime-ns) ===============================
-// kj_theta — t-independent edge product theta[c*ns+x] = node_eig (.) dad_eig, materialised so kj_derv AND
-// kj_ratenum can both read it (k2_derv above fuses the product; JOLT needs theta cached for the rate gradient).
-__global__ void kj_theta(int ns, int nptn, int blockc,
-        const double* __restrict__ node, const double* __restrict__ dad, double* __restrict__ theta){
-    int ptn = blockIdx.x*blockDim.x + threadIdx.x; if (ptn>=nptn) return;
-    for (int k=0;k<blockc;k++){ size_t o=(size_t)k*nptn+ptn; theta[o]=node[o]*dad[o]; }
-}
-// kj_derv — per-pattern lnL/df/ddf from cached theta and the t-dependent g_val0/1/2 (= k2_derv from theta).
-// G.4.3b +I: the total pattern likelihood is L_p = (1-pinv)*Vbar_p + pinv*base_invar[p]. Because g_val0 folds in
-// catProp = (1-pinv)/K (RateGammaInvar::getProp), the theta-reduction lh already equals (1-pinv)*Vbar_p, so the
-// total is simply Lp = lh + pinv*baseinvar[ptn]. The invariant term is branch/alpha-INDEPENDENT, so d1=dLp/dt and
-// d2=d2Lp/dt2 are unchanged — only the DENOMINATOR becomes Lp (=> df/ddf are the +I-correct log-derivatives).
-// pinv=0 => Lp==lh, byte-identical to the pre-+I behaviour (baseinvar may be any valid buffer).
-__global__ void kj_derv(int ns, int nptn, int ncat, const double* __restrict__ theta,
-        double pinv, const double* __restrict__ baseinvar,
-        double* __restrict__ patlh, double* __restrict__ pdf, double* __restrict__ pddf){
-    int ptn = blockIdx.x*blockDim.x + threadIdx.x; if (ptn>=nptn) return;
-    double lh=0.0,d1=0.0,d2=0.0;
-    for (int c=0;c<ncat;c++) for (int x=0;x<ns;x++){
-        double th=theta[(size_t)(c*ns+x)*nptn+ptn]; int k=c*ns+x;
-        lh+=g_val0[k]*th; d1+=g_val1[k]*th; d2+=g_val2[k]*th; }
-    double Lp=fabs(lh)+pinv*baseinvar[ptn]; double inv=1.0/Lp, r=d1*inv;
-    patlh[ptn]=log(Lp); pdf[ptn]=r; pddf[ptn]=d2*inv-r*r;
-}
-// part8 #3 — kj_derv_fused: FUSE kj_theta + kj_derv + kj_ratenum. Compute theta = node*dad in REGISTERS (never
+// kj_derv_fused: compute theta = node*dad in REGISTERS (never
 // materialised to the 601 MB d_theta), then emit patlh/pdf/pddf AND (if rnum!=null) accumulate the per-category
 // rate-gradient numerator (rnum[c] += g_rscale[c]*Σ_x g_val1[c,x]*theta) — one pass, node+dad read once each, the
 // theta VRAM round-trip (1 write + 2 reads = 3x slotSz/edge) ELIMINATED. On the bandwidth-bound kernel this is the
@@ -449,34 +322,6 @@ __global__ void kj_derv_fused(int ns, int nptn, int ncat,
         lh+=lcc; d1+=rc;
         if (rnum) rnum[(size_t)c*nptn+ptn]+=g_rscale[c]*rc;
         if (wnum) wnum[(size_t)c*nptn+ptn]=lcc;   // G.5.1: Lc(p)=Σ_x g_val0[c,x]·θ (category weight w_c already folded into g_val0)
-    }
-    double Lp=fabs(lh)+pinv*baseinvar[ptn]; double inv=1.0/Lp, r=d1*inv;
-    patlh[ptn]=log(Lp); pdf[ptn]=r; pddf[ptn]=d2*inv-r*r;
-}
-// Inc 2 (async/streams ladder): kj_derv_fused_args — a CHARACTER-FOR-CHARACTER twin of kj_derv_fused whose four
-// per-edge coefficient tables (val0/val1/val2/rscale) arrive as KERNEL ARGS (dval0/dval1/dval2/drscale) instead of
-// the __constant__ g_val0/g_val1/g_val2/g_rscale. SAME loop nesting, SAME (c,x) product order, SAME lh/d1/d2 +=
-// accumulation, SAME rnum+= / wnum= stores => BIT-IDENTICAL output to kj_derv_fused given the SAME table bytes. The 4
-// pointer args are LAST so existing 12-arg kj_derv_fused<<<>>>(...) call sites are untouched. Used ONLY on the gated
-// (JOLT_TS_ASYNC=1) reopt path; the per-edge coefficient block is staged into a private valpool slot and copied
-// async, eliminating the per-edge cudaMemcpyToSymbol storm (constant memory must be set on the default stream).
-__global__ void kj_derv_fused_args(int ns,int nptn,int ncat,
-        const double* __restrict__ node,const double* __restrict__ dad,
-        double pinv,const double* __restrict__ baseinvar,
-        double* __restrict__ patlh,double* __restrict__ pdf,double* __restrict__ pddf,
-        double* __restrict__ rnum,double* __restrict__ wnum,
-        const double* __restrict__ dval0,const double* __restrict__ dval1,
-        const double* __restrict__ dval2,const double* __restrict__ drscale){
-    int ptn = blockIdx.x*blockDim.x + threadIdx.x; if (ptn>=nptn) return;
-    double lh=0.0,d1=0.0,d2=0.0;
-    for (int c=0;c<ncat;c++){
-        double rc=0.0, lcc=0.0;
-        for (int x=0;x<ns;x++){ int k=c*ns+x; size_t o=(size_t)k*nptn+ptn;
-            double th=node[o]*dad[o];
-            lcc+=dval0[k]*th; rc+=dval1[k]*th; d2+=dval2[k]*th; }
-        lh+=lcc; d1+=rc;
-        if (rnum) rnum[(size_t)c*nptn+ptn]+=drscale[c]*rc;
-        if (wnum) wnum[(size_t)c*nptn+ptn]=lcc;   // G.5.1: Lc(p)=Σ_x dval0[c,x]·θ (category weight w_c already folded in)
     }
     double Lp=fabs(lh)+pinv*baseinvar[ptn]; double inv=1.0/Lp, r=d1*inv;
     patlh[ptn]=log(Lp); pdf[ptn]=r; pddf[ptn]=d2*inv-r*r;
@@ -572,14 +417,6 @@ __global__ void make_pmat(int ns, int ncat, int nnodes, const double* __restrict
         for (int i=0;i<ns;i++) v += ec[i]*g_Uinv[i*ns+t];   // Σ_i echild[x][i]·Uinv[i][t] = P(b)[x][t]
         pm[t]=v; }
 }
-// kj_ratenum — accumulate b_e*qp_e[k] into rnum[k][ptn] per category (the +R/alpha rate-grad numerator).
-// g_rscale[k]=b_e/(r_k*w_k) folds the chain rule; Sum_x g_val1[k,x]*theta = r_k*w_k*qp_e[k].
-__global__ void kj_ratenum(int ns, int nptn, int ncat, const double* __restrict__ theta, double* __restrict__ rnum){
-    int ptn = blockIdx.x*blockDim.x + threadIdx.x; if (ptn>=nptn) return;
-    for (int k=0;k<ncat;k++){ double s=0.0;
-        for (int x=0;x<ns;x++) s+=g_val1[k*ns+x]*theta[(size_t)(k*ns+x)*nptn+ptn];
-        rnum[(size_t)k*nptn+ptn]+=g_rscale[k]*s; }
-}
 // G.5.0 — kj_reduce3: deterministic block-level FP64 reduction of the 3 per-pattern derivative channels
 // {patlh,pdf,pddf}, each weighted by ptn_freq, replacing reduceDerv's 3x nptn D2H + single-threaded host Kahan
 // loop (called ~197x/gradient-sweep + 1x/evalLnL — the measured #1 host-reduction stall, part8 VIII.2 #1).
@@ -647,75 +484,11 @@ static DevBuf gb_echild, gb_tip, gb_partial, gb_patlh, gb_pdf, gb_pddf, gb_nodel
 static DevBuf gb_n1eig, gb_n2eig;   // TS.2-I3a: re-pairing-fold scratch (node1/node2 swapped directed eigen partials)
 static DevBuf gb_valall;            // TS.2.1 K1: per-move central-edge {v0,v1,v2} coeff tables (nMoves*3*ncat*ns), uploaded ONCE
 static DevBuf gb_baseinvar;         // A3 (+I): screener per-pattern invariant base, chunk-sized, uploaded per chunk
-static DevBuf gb_sptnfreq, gb_sredpart;   // TS.2.1 K1: screener on-device reduction — per-chunk device ptn_freq + 3*nblk block-partials (env TS_SCREEN_GPUREDUCE)
 static DevBuf gb_uexpfac, gb_upper;  // TS.2-I3b: per-node expfac (parent branch) + PERSISTENT per-node upper-partial buffer
 static DevBuf gb_pmat;               // TS.2 fix: per-node node-space transition P(b)=echild·Uinv (derived on-device, screeners)
-static DevBuf gb_n1batch, gb_n2batch, gb_patlhbatch, gb_mvdesc;   // TS RAKE BATCH: B-wide per-move fold scratch (n1/n2 eigen + patlh) + packed [14][nMoves] move-descriptors
 #define DEVB(b, bytes) do{ if(!devbuf_ensure((b),(size_t)(bytes))){ \
     fprintf(stderr,"[GPU] devbuf_ensure failed (%zu bytes) at %s:%d\n",(size_t)(bytes),__FILE__,__LINE__); \
     return (double)NAN; } }while(0)
-
-// ============================================================================================================
-// ASYNC/STREAMS substrate (Inc 0) — process-global stream pool + pinned host staging for screener move overlap.
-// Master gate JOLT_TS_ASYNC (default OFF). When OFF, the screener uses S=1, the default stream (arg 0), and the
-// exact same scratch allocation as before => BYTE-IDENTICAL behavior (verify by diffing the OFF code path).
-// When ON (JOLT_TS_ASYNC set), the screener move loop round-robins moves across g_ts_streams[0..S-1] into S
-// private scratch slots, async-D2H's each move's per-pattern lnL into a pinned per-move row, ONE sync after the
-// chunk, then the host Kahan gather over m runs in the EXACT existing order on identical floats. The stream pool
-// and pinned buffer are lazily created and NEVER freed (released at process exit), mirroring the DevBuf pool.
-// JOLT_TS_NSTREAMS sets the pool size K (default 8). The active stream count S used by the screener is
-// min(K, nMoves) when async, else 1.
-static bool g_ts_async       = (getenv("JOLT_TS_ASYNC") != nullptr);        // master gate (default OFF)
-static bool g_ts_async_check = (getenv("JOLT_TS_ASYNC_CHECK") != nullptr);  // bit-exact shadow-check gate
-// ---- TS RAKE BATCH (2026-06-29): batch the per-move screener folds into one 2D-grid launch (blockIdx.y=move) to
-// fill the H200 grid (the kcount-measured FOLD slice = 34% of partial launches, each currently a 32%-occupancy
-// kernel). Default OFF => byte-identical. JOLT_TS_BATCHFOLD_B = #moves per batched launch (grid fill vs HBM). ----
-static bool g_ts_batchfold       = (getenv("JOLT_TS_BATCHFOLD") != nullptr);        // master gate (default OFF)
-static bool g_ts_batchfold_check = (getenv("JOLT_TS_BATCHFOLD_CHECK") != nullptr);  // bit-exact shadow-check gate
-static int  ts_batchfold_B_init(){ int v=64; if(const char* e=getenv("JOLT_TS_BATCHFOLD_B")){ int t=atoi(e); if(t>=1) v=t; } return v; }
-static int  g_ts_batchfold_B = ts_batchfold_B_init();
-// Lazily-initialized stream pool. g_ts_nstreams is the realized pool size; 0 until first ts_streams() call.
-static cudaStream_t* g_ts_streams = nullptr;
-static int           g_ts_nstreams = 0;
-// Return the process-global stream pool (lazily created, never freed). Returns nullptr / sets *K=0 on any error
-// (caller then falls back to the default-stream serial path => still correct, just unoptimized).
-static cudaStream_t* ts_streams(int* K) {
-    if (g_ts_streams == nullptr) {
-        int want = 8;
-        if (const char* e = getenv("JOLT_TS_NSTREAMS")) { int v = atoi(e); if (v >= 1) want = v; }
-        cudaStream_t* arr = (cudaStream_t*)malloc((size_t)want * sizeof(cudaStream_t));
-        if (!arr) { *K = 0; return nullptr; }
-        int made = 0;
-        for (int i = 0; i < want; i++) { if (cudaStreamCreate(&arr[i]) != cudaSuccess) break; made++; }
-        if (made == 0) { free(arr); *K = 0; return nullptr; }
-        g_ts_streams = arr; g_ts_nstreams = made;
-        if (getenv("JOLT_DEBUG")) fprintf(stderr,"[TS-ASYNC] stream pool created: %d streams\n", made);
-    }
-    *K = g_ts_nstreams; return g_ts_streams;
-}
-// Pinned host staging for async per-move D2H of the per-pattern lnL (one contiguous row of chunk0 doubles per
-// move). Lazily grown (cudaFreeHost+cudaMallocHost on growth); never freed at the end. Used ONLY when async.
-static double* g_ts_pin_patlh = nullptr;
-static size_t  g_ts_pin_cap   = 0;   // capacity in doubles
-static bool ts_pin_ensure(size_t needDoubles) {
-    if (needDoubles <= g_ts_pin_cap && g_ts_pin_patlh) return true;
-    if (g_ts_pin_patlh) { cudaFreeHost(g_ts_pin_patlh); g_ts_pin_patlh = nullptr; g_ts_pin_cap = 0; }
-    if (cudaMallocHost((void**)&g_ts_pin_patlh, needDoubles*sizeof(double)) != cudaSuccess) {
-        g_ts_pin_patlh = nullptr; g_ts_pin_cap = 0; return false; }
-    g_ts_pin_cap = needDoubles; return true;
-}
-// Inc 2 reopt valpool — device-side staging for the per-edge coefficient block [v0|v1|v2|rs] (the per-stream block is
-// valBlk = 3*ncat*ns + ncat doubles: v0,v1,v2 each ncat*ns then rscale ncat). Replaces the per-edge memcpyToSymbol of
-// g_val0/g_val1/g_val2/g_rscale (constant memory, default-stream only) with ONE async H2D into a private slot the new
-// kj_derv_fused_args reads as kernel args. Lazily grown (cudaFree+cudaMalloc on growth); NEVER freed (released at
-// process exit), mirroring g_ts_pin_patlh and the DevBuf pool. Inc 2 keeps reopt SERIAL, so one slot suffices, but the
-// pool is sized S*valBlk so Inc 3 can round-robin slots without re-plumbing.
-static double* g_ts_valpool = nullptr; static size_t g_ts_valpool_cap = 0;
-static bool ts_valpool_ensure(size_t needDoubles){
-  if(needDoubles<=g_ts_valpool_cap && g_ts_valpool) return true;
-  if(g_ts_valpool){cudaFree(g_ts_valpool);g_ts_valpool=nullptr;g_ts_valpool_cap=0;}
-  if(cudaMalloc((void**)&g_ts_valpool,needDoubles*sizeof(double))!=cudaSuccess){g_ts_valpool=nullptr;g_ts_valpool_cap=0;return false;}
-  g_ts_valpool_cap=needDoubles; return true; }
 
 // ============================================================================================================
 // TS.8 GPU PARSIMONY (Phase A) — batched per-taxon-insertion branch scoring.
@@ -806,104 +579,6 @@ extern "C" int gpu_parsimony_score_branches(
     if (cudaMemcpy(h_out, gb_parsOut.p, scB, cudaMemcpyDeviceToHost) != cudaSuccess) return -1;
     if (cudaDeviceSynchronize() != cudaSuccess) return -1;
     return 0;
-}
-
-// ===========================================================================================================
-// TS.8 Phase-B v1 keystone: device postorder COMBINE-to-arena. Reuses the EXACT Fitch combine validated by
-// k_pars_score_branches (parsval 172472092: AA+DNA bit-identical), but WRITES the combined state-set z[] to an
-// arena slot and accumulates the subtree score, instead of scoring against a tip. One block per combine-task;
-// all tasks in a launch are one tree level (children already materialised). Inputs A/B are arena slots (idx>=0)
-// or resident leaves (idx<0, encoded -(leafid+1)); leaf subtree-score = 0. This is the per-node primitive of the
-// recompute-from-resident-leaves design (no per-insertion partial H2D, host driver untouched). NOT yet wired.
-__global__ void k_pars_combine_to_arena(
-        const unsigned int* __restrict__ leaves,   // nseq * (nstates*nsblk)
-        unsigned int* __restrict__ arena,          // maxSlots * (nstates*nsblk)
-        unsigned int* __restrict__ arenaScore,     // maxSlots
-        const int* __restrict__ taskOut,           // T : destination arena slot
-        const int* __restrict__ taskA,             // T : child A (>=0 arena slot, <0 leaf=-(id+1))
-        const int* __restrict__ taskB,             // T : child B
-        int nstates, int nsblk, int T)
-{
-    int tk = blockIdx.x;
-    if (tk >= T) return;
-    size_t setU = (size_t)nstates * nsblk;
-    int a = taskA[tk], b = taskB[tk];
-    const unsigned int* X = (a >= 0) ? arena  + (size_t)a * setU : leaves + (size_t)(-(a + 1)) * setU;
-    const unsigned int* Y = (b >= 0) ? arena  + (size_t)b * setU : leaves + (size_t)(-(b + 1)) * setU;
-    unsigned int* O = arena + (size_t)taskOut[tk] * setU;
-    unsigned int acc = 0u;
-    for (int s = threadIdx.x; s < nsblk; s += blockDim.x) {
-        const unsigned int* x = X + (size_t)s * nstates;
-        const unsigned int* y = Y + (size_t)s * nstates;
-        unsigned int* o       = O + (size_t)s * nstates;
-        unsigned int z[PARS_MAXST];
-        unsigned int w1 = 0u;
-        for (int i = 0; i < nstates; i++) { z[i] = x[i] & y[i]; w1 |= z[i]; }
-        w1 = ~w1;
-        acc += __popc(w1);
-        for (int i = 0; i < nstates; i++) { z[i] |= w1 & (x[i] | y[i]); o[i] = z[i]; }
-    }
-    __shared__ unsigned int sh[PARS_TPB];
-    sh[threadIdx.x] = acc;
-    __syncthreads();
-    for (int st = blockDim.x >> 1; st > 0; st >>= 1) {
-        if (threadIdx.x < st) sh[threadIdx.x] += sh[threadIdx.x + st];
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-        unsigned int sA = (a >= 0) ? arenaScore[a] : 0u;
-        unsigned int sB = (b >= 0) ? arenaScore[b] : 0u;
-        arenaScore[taskOut[tk]] = sh[0] + sA + sB;
-    }
-}
-
-// TS.8 Phase-B v1: score candidate insertion branches by INDEX (no per-branch materialised copy / no H2D of
-// partials). One block per candidate k: gather candL[k]/candR[k] from arena(>=0) or resident leaves(<0), combine
-// (Fitch), then combine with the new-taxon tip (resident leaf tipLeaf, score 0). Identical math to
-// k_pars_score_branches (validated bit-identical), just index-gathered from device-resident buffers.
-__global__ void k_pars_score_indexed(
-        const unsigned int* __restrict__ leaves,    // nLeaf * setU
-        const unsigned int* __restrict__ arena,     // maxSlots * setU
-        const unsigned int* __restrict__ arenaScore,// maxSlots
-        const int* __restrict__ candL,              // nCand : ref (>=0 arena slot, <0 leaf -(id+1))
-        const int* __restrict__ candR,              // nCand
-        const unsigned int* __restrict__ tipPart,   // setU : the new-taxon tip partial (resident leaf row)
-        int nstates, int nsblk, int nCand,
-        unsigned int* __restrict__ out)             // nCand
-{
-    int k = blockIdx.x;
-    if (k >= nCand) return;
-    size_t setU = (size_t)nstates * nsblk;
-    int a = candL[k], b = candR[k];
-    const unsigned int* X = (a >= 0) ? arena + (size_t)a * setU : leaves + (size_t)(-(a + 1)) * setU;
-    const unsigned int* Y = (b >= 0) ? arena + (size_t)b * setU : leaves + (size_t)(-(b + 1)) * setU;
-    unsigned int acc = 0u;
-    for (int s = threadIdx.x; s < nsblk; s += blockDim.x) {
-        const unsigned int* x = X + (size_t)s * nstates;
-        const unsigned int* y = Y + (size_t)s * nstates;
-        const unsigned int* t = tipPart + (size_t)s * nstates;
-        unsigned int z[PARS_MAXST];
-        unsigned int w1 = 0u;
-        for (int i = 0; i < nstates; i++) { z[i] = x[i] & y[i]; w1 |= z[i]; }
-        w1 = ~w1;
-        acc += __popc(w1);
-        unsigned int w2 = 0u;
-        for (int i = 0; i < nstates; i++) { z[i] |= w1 & (x[i] | y[i]); w2 |= t[i] & z[i]; }
-        w2 = ~w2;
-        acc += __popc(w2);
-    }
-    __shared__ unsigned int sh[PARS_TPB];
-    sh[threadIdx.x] = acc;
-    __syncthreads();
-    for (int st = blockDim.x >> 1; st > 0; st >>= 1) {
-        if (threadIdx.x < st) sh[threadIdx.x] += sh[threadIdx.x + st];
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-        unsigned int sA = (a >= 0) ? arenaScore[a] : 0u;
-        unsigned int sB = (b >= 0) ? arenaScore[b] : 0u;
-        out[k] = sh[0] + sA + sB;   // tipScore = 0 (leaf)
-    }
 }
 
 // ===== TS.8 v2 Stage-1: 2D-grid variants (blockIdx.y = pattern-chunk) — saturate the H200 on a SINGLE launch.
@@ -1044,38 +719,23 @@ extern "C" int gpu_parsimony_build_and_score(
     const int* dTaskA   = (const int*)gb_pbTaskA.p;
     const int* dTaskB   = (const int*)gb_pbTaskB.p;
     const unsigned int* dTip = dLeaves + (size_t)tipLeaf * setU;
-    // v2 Stage-1: 2D-grid (saturating, atomicAdd) by default; GPU_PARS_1D forces the v1 1D path (A/B + reference).
-    static const bool use1d = (getenv("GPU_PARS_1D") != nullptr);
-    if (use1d) {
-        for (int l = 0; l < nLevel; l++) {                       // v1: grid = cnt, nsblk in thread stride
-            int base = h_levelStart[l], cnt = h_levelStart[l+1] - base;
-            if (cnt <= 0) continue;
-            k_pars_combine_to_arena<<<cnt, PARS_TPB>>>(dLeaves, dArena, dScore,
-                dTaskOut + base, dTaskA + base, dTaskB + base, nstates, nsblk, cnt);
-            if (cudaGetLastError() != cudaSuccess) return -1;
-        }
-        k_pars_score_indexed<<<nCand, PARS_TPB>>>(dLeaves, dArena, dScore,
-            (const int*)gb_pbCandL.p, (const int*)gb_pbCandR.p, dTip, nstates, nsblk, nCand,
-            (unsigned int*)gb_pbScores.p);
-        if (cudaGetLastError() != cudaSuccess) return -1;
-    } else {
-        const int CH = 128;                                      // spike-tuned; nChunk=ceil(nsblk/CH) saturates SMs
-        const int nChunk = (nsblk + CH - 1) / CH;
-        // atomicAdd accumulators MUST start at 0 (combine writes touched slots; score writes nCand)
-        if (cudaMemset(dScore, 0, (size_t)maxSlots * sizeof(unsigned int)) != cudaSuccess) return -1;
-        if (cudaMemset(gb_pbScores.p, 0, (size_t)nCand * sizeof(unsigned int)) != cudaSuccess) return -1;
-        for (int l = 0; l < nLevel; l++) {                       // sequential launches => level L+1 reads level L's scores
-            int base = h_levelStart[l], cnt = h_levelStart[l+1] - base;
-            if (cnt <= 0) continue;
-            k_pars_combine_to_arena_2d<<<dim3(cnt, nChunk), PARS_TPB>>>(dLeaves, dArena, dScore,
-                dTaskOut + base, dTaskA + base, dTaskB + base, nstates, nsblk, cnt, CH);
-            if (cudaGetLastError() != cudaSuccess) return -1;
-        }
-        k_pars_score_indexed_2d<<<dim3(nCand, nChunk), PARS_TPB>>>(dLeaves, dArena, dScore,
-            (const int*)gb_pbCandL.p, (const int*)gb_pbCandR.p, dTip, nstates, nsblk, nCand, CH,
-            (unsigned int*)gb_pbScores.p);
+    // v2 Stage-1: 2D-grid (saturating, atomicAdd) — the production path.
+    const int CH = 128;                                      // spike-tuned; nChunk=ceil(nsblk/CH) saturates SMs
+    const int nChunk = (nsblk + CH - 1) / CH;
+    // atomicAdd accumulators MUST start at 0 (combine writes touched slots; score writes nCand)
+    if (cudaMemset(dScore, 0, (size_t)maxSlots * sizeof(unsigned int)) != cudaSuccess) return -1;
+    if (cudaMemset(gb_pbScores.p, 0, (size_t)nCand * sizeof(unsigned int)) != cudaSuccess) return -1;
+    for (int l = 0; l < nLevel; l++) {                       // sequential launches => level L+1 reads level L's scores
+        int base = h_levelStart[l], cnt = h_levelStart[l+1] - base;
+        if (cnt <= 0) continue;
+        k_pars_combine_to_arena_2d<<<dim3(cnt, nChunk), PARS_TPB>>>(dLeaves, dArena, dScore,
+            dTaskOut + base, dTaskA + base, dTaskB + base, nstates, nsblk, cnt, CH);
         if (cudaGetLastError() != cudaSuccess) return -1;
     }
+    k_pars_score_indexed_2d<<<dim3(nCand, nChunk), PARS_TPB>>>(dLeaves, dArena, dScore,
+        (const int*)gb_pbCandL.p, (const int*)gb_pbCandR.p, dTip, nstates, nsblk, nCand, CH,
+        (unsigned int*)gb_pbScores.p);
+    if (cudaGetLastError() != cudaSuccess) return -1;
     if (cudaMemcpy(h_scores, gb_pbScores.p, (size_t)nCand*sizeof(unsigned int), cudaMemcpyDeviceToHost)!=cudaSuccess) return -1;
     if (cudaDeviceSynchronize() != cudaSuccess) return -1;
     return 0;
@@ -1996,13 +1656,6 @@ extern "C" double gpu_screen_nni_batch_crosscheck(
 // auto path. out_ntile reports the chosen nTile. echild/expfac/eigen carry NO pattern axis (uploaded once); the
 // move descriptors are pattern-INDEPENDENT (enumerated once, reused every chunk). NO new kernel.
 // ============================================================================================================
-// TS-KCOUNT (env TS_KCOUNT, default OFF => byte-identical): per-call-site partial-kernel LAUNCH counters to size
-// the redundancy split — base postorder sweep (recomputed every round = shareable/redundant) vs per-move folds
-// (one per distinct NNI move = NECESSARY) vs the upper sweep vs reopt. Counts LAUNCHES (grid invocations), not
-// blocks. Printed per-call + cumulative at the two extern-C drivers. Read-only side counters => no math change.
-static const bool g_kcount = (getenv("TS_KCOUNT") != nullptr);
-static long g_kc_scr_base = 0, g_kc_scr_upper = 0, g_kc_scr_fold = 0, g_kc_scr_calls = 0;
-static long g_kc_reopt_part = 0, g_kc_reopt_calls = 0;
 
 extern "C" double gpu_screen_nni_tile_crosscheck(
     int nstates, int nptn, int ncat, int ntax, int nnodes, int nInternal, int root,
@@ -2031,22 +1684,10 @@ extern "C" double gpu_screen_nni_tile_crosscheck(
     GCK(cudaMemcpyToSymbol(g_freq, freq, sizeof(double)*ns));
     GCK(cudaMemcpyToSymbol(g_catw, catProp, sizeof(double)*ncat));
 
-    // ---- ASYNC (Inc 0): stream count S for the screener move loop. OFF => S=1 (default stream, identical alloc).
-    //      ON => S=min(poolK,nMoves) private scratch slots round-robined across g_ts_streams. ts_streams() lazily
-    //      creates the never-freed pool; if it fails we fall back to S=1 (serial, still correct). ----
-    int S = 1; cudaStream_t* tsS = nullptr;
-    if (g_ts_async && nMoves > 0) {
-        int poolK = 0; tsS = ts_streams(&poolK);
-        if (tsS && poolK >= 1) { S = (poolK < nMoves) ? poolK : nMoves; }
-    }
+    // ---- the screener move loop runs on the default stream with a single scratch slot. ----
+    const int S = 1;
     // ---- pick nTile: persistent upper (nnodes) + lowers (nInternal) + 5 R*ns scratch + 3 per-pattern scalars ----
-    // ASYNC: the per-move move-loop scratch (n1eig+n2eig = 2*R*ns + pdf/pddf/patlh = 3 scalars, per pattern) is
-    // replicated S× so each stream owns a private slot. Add the (S-1) EXTRA copies to perPtnDoubles so the tiling
-    // still fits HBM. S=1 (OFF) adds 0 => perPtnDoubles is byte-identical to today.
-    size_t perPtnDoubles = ((size_t)nnodes + (size_t)(nInternal>0?nInternal:1) + 5)*(size_t)ncat*ns + 3
-                         + (size_t)(S-1)*(2*(size_t)ncat*ns + 3)
-                         // TS RAKE BATCH: B-wide n1/n2 eigen slots (2*ncat*ns each) + B-wide patlh (1) per pattern (OFF => +0)
-                         + (g_ts_batchfold ? (size_t)g_ts_batchfold_B*(2*(size_t)ncat*ns + 1) : 0);
+    size_t perPtnDoubles = ((size_t)nnodes + (size_t)(nInternal>0?nInternal:1) + 5)*(size_t)ncat*ns + 3;
     int nTile  = (forced_ntile>0) ? forced_ntile : mix_pick_ntile(nptn, perPtnDoubles);
     if (nTile<1) nTile=1; if (nTile>nptn) nTile=nptn;
     int chunk0 = (nptn + nTile - 1) / nTile;
@@ -2073,28 +1714,6 @@ extern "C" double gpu_screen_nni_tile_crosscheck(
     DEVB(gb_n2eig,  (size_t)S*slotSzMax*sizeof(double));
     DEVB(gb_valall, (size_t)(nMoves>0?nMoves:1)*3*ncat*ns*sizeof(double));   // TS.2.1 K1: per-move {v0,v1,v2} tables (pattern-independent), uploaded ONCE
     DEVB(gb_baseinvar, (size_t)chunk0*sizeof(double));   // A3 (+I): per-pattern invariant base, uploaded per chunk
-    // TS RAKE BATCH: B-wide per-move scratch (node1/node2 eigen slots + patlh row). Allocated only when ON; a 1-double
-    // stub keeps DEVB happy when OFF (no HBM cost, never read). B = g_ts_batchfold_B.
-    DEVB(gb_n1batch, (g_ts_batchfold ? (size_t)g_ts_batchfold_B*slotSzMax : 1)*sizeof(double));
-    DEVB(gb_n2batch, (g_ts_batchfold ? (size_t)g_ts_batchfold_B*slotSzMax : 1)*sizeof(double));
-    DEVB(gb_patlhbatch, (g_ts_batchfold ? (size_t)g_ts_batchfold_B*chunk0 : 1)*sizeof(double));
-    double *d_n1batch=(double*)gb_n1batch.p, *d_n2batch=(double*)gb_n2batch.p, *d_patlhbatch=(double*)gb_patlhbatch.p;
-    std::vector<double> plbatch((g_ts_batchfold ? (size_t)g_ts_batchfold_B*chunk0 : 1));
-    // TS RAKE BATCH: the move-descriptor arrays (mv_u, n1a_ec, ... ) are HOST pointers (the serial loop reads them on
-    // the host); upload the 14 of them ONCE into a packed device buffer [14][nMoves] so the batched kernels can index
-    // them by blockIdx.y on the DEVICE. Pattern-chunk-INDEPENDENT => uploaded once, before the tile loop.
-    DEVB(gb_mvdesc, ((g_ts_batchfold && nMoves>0) ? (size_t)14*nMoves : 1)*sizeof(int));
-    int* d_mvdesc=(int*)gb_mvdesc.p;
-    if (g_ts_batchfold && nMoves>0) {
-        const int* hdesc[14]={mv_u,mv_uIsRoot, n1a_ec,n1a_slot,n1a_leaf, n1b_ec,n1b_slot,n1b_leaf,
-                              n2a_ec,n2a_slot,n2a_leaf, n2b_ec,n2b_slot,n2b_leaf};
-        for(int i=0;i<14;i++) GCK(cudaMemcpy(d_mvdesc+(size_t)i*nMoves, hdesc[i], (size_t)nMoves*sizeof(int), cudaMemcpyHostToDevice));
-    }
-    int *d_mv_u=d_mvdesc+0*(size_t)nMoves,    *d_mv_uIsRoot=d_mvdesc+1*(size_t)nMoves;
-    int *d_n1a_ec=d_mvdesc+2*(size_t)nMoves,  *d_n1a_slot=d_mvdesc+3*(size_t)nMoves,  *d_n1a_leaf=d_mvdesc+4*(size_t)nMoves;
-    int *d_n1b_ec=d_mvdesc+5*(size_t)nMoves,  *d_n1b_slot=d_mvdesc+6*(size_t)nMoves,  *d_n1b_leaf=d_mvdesc+7*(size_t)nMoves;
-    int *d_n2a_ec=d_mvdesc+8*(size_t)nMoves,  *d_n2a_slot=d_mvdesc+9*(size_t)nMoves,  *d_n2a_leaf=d_mvdesc+10*(size_t)nMoves;
-    int *d_n2b_ec=d_mvdesc+11*(size_t)nMoves, *d_n2b_slot=d_mvdesc+12*(size_t)nMoves, *d_n2b_leaf=d_mvdesc+13*(size_t)nMoves;
     double *d_baseinvar=(double*)gb_baseinvar.p; bool useInv = (pinv > 0.0 && baseinvar != nullptr);
     double *d_echild=(double*)gb_echild.p, *d_expfac=(double*)gb_uexpfac.p, *d_partial=(double*)gb_partial.p;
     double *d_pmat=(double*)gb_pmat.p;
@@ -2133,48 +1752,26 @@ extern "C" double gpu_screen_nni_tile_crosscheck(
     // CONTINUOUS per-target Kahan: add THIS chunk's Pn patterns into (acc,accK) weighted by ptn_freq[pOff+p].
     // pOff strictly increases & p runs 0..Pn-1 => global add order 0..nptn-1 => bit-identical to nTile=1.
     std::vector<double> plchunk(chunk0);
-    // TS.2.1 K1 (env TS_SCREEN_GPUREDUCE): replace the per-(move,chunk) full-patlh D2H + host-Kahan with an on-device
-    // kj_reduce3 block reduction -> only nblk block-partials D2H (the part8 #1 reduction-stall fix JOLT already has).
-    // The block-tree reduce changes the summation ORDER, so this is RESULT-INVARIANT (screener ranking robust to
-    // ~1e-12, §13.9), NOT bit-identical (it drops the nTile-invariance gate). DEFAULT OFF => the proven host-Kahan path
-    // is byte-identical. Needs a per-chunk device ptn_freq (uploaded in the tile loop). d_pdf/d_pddf are valid (k2_derv
-    // fills all 3 channels); only the patlh channel (h_sredpart[0..GB-1]) is consumed.
-    static const bool TS_GPURED = (getenv("TS_SCREEN_GPUREDUCE") != nullptr);
-    int GBmax = (chunk0+TB-1)/TB;
-    double *d_sptnfreq=nullptr, *d_sredpart=nullptr; std::vector<double> h_sredpart;
-    if (TS_GPURED) { DEVB(gb_sptnfreq,(size_t)chunk0*sizeof(double)); d_sptnfreq=(double*)gb_sptnfreq.p;
-        DEVB(gb_sredpart,(size_t)3*GBmax*sizeof(double)); d_sredpart=(double*)gb_sredpart.p; h_sredpart.resize(GBmax); }
     auto reduceInto=[&](double& acc,double& accK){
-        if (TS_GPURED) {
-            kj_reduce3<<<GB,TB,(size_t)3*TB*sizeof(double)>>>(Pn,d_patlh,d_pdf,d_pddf,d_sptnfreq,GB,d_sredpart);
-            cudaMemcpy(h_sredpart.data(),d_sredpart,(size_t)GB*sizeof(double),cudaMemcpyDeviceToHost);
-            double L=acc,k=accK; for(int b=0;b<GB;b++){ double term=h_sredpart[b], y=term-k, s=L+y; k=(s-L)-y; L=s; }
-            acc=L; accK=k; return; }
         cudaMemcpy(plchunk.data(),d_patlh,(size_t)Pn*sizeof(double),cudaMemcpyDeviceToHost);
         double L=acc,k=accK; for(int p=0;p<Pn;p++){ double term=ptn_freq[pOff+p]*plchunk[p], y=term-k, s=L+y; k=(s-L)-y; L=s; }
         acc=L; accK=k; };
 
     // PERSISTENT UPPER stored NODE-SPACE (positive products): seed root-children with k1_node_prod; interior
     // up_v = (P(b_u)·up_u) ⊙ fsib via kj_pre_node(eigOut=0). No eigen round-trip => no cancellation (F39/F40 fix).
-    // TS_EIGEN_UPPER=1 (DIAGNOSTIC ONLY): selects the pre-migration EIGEN upper (k1_node + kj_pre via d_expfac) so a
-    // single binary can run the eigen-vs-node-space head-to-head (reliability/wall). Default OFF = node-space production.
-    bool eigUpper = (getenv("TS_EIGEN_UPPER") != nullptr);
     std::function<void(int)> proc=[&](int u)->double{
         for(int kk=0; kk<node_nchild[u]; kk++){
             int v=node_child[u*3+kk];
             double* pre=d_upper+(size_t)v*slotSz;
             if(u==root){
                 int nch; const double* ec[3]; const double* p[3]; const unsigned char* t[3]; fillChild(root,v,nch,ec,p,t);
-                if(eigUpper) k1_node<<<GB,TB>>>(ns,Pn,ncat,/*isRoot=*/0,pre,d_patlh,nch, ec[0],p[0],t[0], ec[1],p[1],t[1], ec[2],p[2],t[2]);
-                else         k1_node_prod<<<GB,TB>>>(ns,Pn,ncat,pre,nch, ec[0],p[0],t[0], ec[1],p[1],t[1], ec[2],p[2],t[2]);
+                k1_node_prod<<<GB,TB>>>(ns,Pn,ncat,pre,nch, ec[0],p[0],t[0], ec[1],p[1],t[1], ec[2],p[2],t[2]);
             } else {
                 const double* ec[2]={0,0}; const double* sp[2]={0,0}; const unsigned char* st[2]={0,0}; int nsb=0;
                 for(int jj=0; jj<node_nchild[u]; jj++){ int w=node_child[u*3+jj]; if(w==v||nsb>=2) continue;
                     ec[nsb]=d_echild+(size_t)w*ecStride;
                     if(node_leaf[w]>=0) st[nsb]=d_tip+(size_t)node_leaf[w]*Pn; else sp[nsb]=d_partial+(size_t)node_slot[w]*slotSz; nsb++; }
-                if(eigUpper) kj_pre<<<GB,TB>>>(ns,Pn,ncat,pre,d_upper+(size_t)u*slotSz,d_expfac+(size_t)u*exStride,nsb,
-                    ec[0],sp[0],st[0], ec[1],sp[1],st[1]);
-                else         kj_pre_node<<<GB,TB>>>(ns,Pn,ncat,/*eigOut=*/0,pre,d_upper+(size_t)u*slotSz,d_pmat+(size_t)u*ecStride,nsb,
+                kj_pre_node<<<GB,TB>>>(ns,Pn,ncat,/*eigOut=*/0,pre,d_upper+(size_t)u*slotSz,d_pmat+(size_t)u*ecStride,nsb,
                     ec[0],sp[0],st[0], ec[1],sp[1],st[1]);
             }
             GCK(cudaDeviceSynchronize());
@@ -2194,7 +1791,6 @@ extern "C" double gpu_screen_nni_tile_crosscheck(
         for(int a=0;a<ntax;a++) memcpy(&tipChunk[(size_t)a*Pn], tip+(size_t)a*nptn+pOff, (size_t)Pn);   // gather chunk columns
         GCK(cudaMemcpy(d_tip,tipChunk.data(),(size_t)ntax*Pn,cudaMemcpyHostToDevice));
         if (useInv) GCK(cudaMemcpy(d_baseinvar, baseinvar+pOff, (size_t)Pn*sizeof(double), cudaMemcpyHostToDevice));   // A3: this chunk's invariant base
-        if (TS_GPURED) GCK(cudaMemcpy(d_sptnfreq, ptn_freq+pOff, (size_t)Pn*sizeof(double), cudaMemcpyHostToDevice));   // TS.2.1 K1: this chunk's ptn_freq (for kj_reduce3)
 
         // POSTORDER (resident lowers for THIS chunk)
         for (int idx=0; idx<nInternal; idx++){ int u=post_internal[idx]; if(u==root) continue;
@@ -2203,7 +1799,6 @@ extern "C" double gpu_screen_nni_tile_crosscheck(
                 ec[0],p[0],t[0], ec[1],p[1],t[1], ec[2],p[2],t[2]); }
         GCK(cudaDeviceSynchronize()); GCK(cudaGetLastError());
 
-        if (g_kcount) g_kc_scr_base += nInternal;   // base postorder lowers, one k1_node/internal-node, recomputed THIS chunk
         // TREE-LNL (independent root isRoot=1 reduction) -> carried accTree. MUST precede the preorder (proc clobbers d_patlh).
         { int nch; const double* ec[3]; const double* p[3]; const unsigned char* t[3]; fillChild(root,-1,nch,ec,p,t);
           k1_node<<<GB,TB>>>(ns,Pn,ncat,/*isRoot=*/1,nullptr,d_patlh,nch, ec[0],p[0],t[0], ec[1],p[1],t[1], ec[2],p[2],t[2]);
@@ -2213,157 +1808,29 @@ extern "C" double gpu_screen_nni_tile_crosscheck(
         // PREORDER (persistent per-node upper d_upper[v] for THIS chunk)
         proc(root);
         GCK(cudaDeviceSynchronize()); GCK(cudaGetLastError());
-        if (g_kcount) g_kc_scr_upper += nInternal;   // base preorder uppers (~1 kj_pre/kj_pre_node per internal node)
 
         // MOVE LOOP (each move = 2 cheap folds + k2_derv off the resident lowers + persistent uppers) -> carried accMove[m]
-        // ---- launch one move m onto stream `st` into scratch slot `s` (slot s owns disjoint regions of the S-wide
-        //      n1eig/n2eig/pdf/pddf/patlh buffers). st==0 (default stream) + s==0 reproduces the legacy launch EXACTLY.
-        auto launchMove = [&](int m, int s, cudaStream_t st){
+        // Serial path: default stream, single scratch, per-move sync+reduce.
+        for (int m=0; m<nMoves; m++){
             int u=mv_u[m];
-            double* p_n1 = d_n1eig + (size_t)s*slotSzMax;   // per-slot scratch bases (slot stride = MAX-chunk width;
-            double* p_n2 = d_n2eig + (size_t)s*slotSzMax;   // kernel writes only slotSz<=slotSzMax of it -> disjoint)
-            double* p_pdf= d_pdf   + (size_t)s*chunk0;
-            double* p_pddf=d_pddf  + (size_t)s*chunk0;
-            double* p_pl = d_patlh + (size_t)s*chunk0;
             if (mv_uIsRoot[m]) {   // u==root: no upper -> k1_node({swapped-in child, root-leaf}) (eigen), unchanged
-                k1_node<<<GB,TB,0,st>>>(ns,Pn,ncat,/*isRoot=*/0,p_n1,p_pl,/*nchild=*/2,
+                k1_node<<<GB,TB>>>(ns,Pn,ncat,/*isRoot=*/0,d_n1eig,d_patlh,/*nchild=*/2,
                     ecP(n1a_ec[m]),plP(n1a_slot[m]),tpP(n1a_leaf[m]), ecP(n1b_ec[m]),plP(n1b_slot[m]),tpP(n1b_leaf[m]), nullptr,nullptr,nullptr);
             } else {               // interior u: node1Eig = Uinv·((P(b_u)·up_u) ⊙ (P(b_swapchild)·L_swapchild)), eigOut=1
-                if(eigUpper) kj_pre<<<GB,TB,0,st>>>(ns,Pn,ncat,p_n1,d_upper+(size_t)u*slotSz,d_expfac+(size_t)u*exStride,/*nsib=*/1,
-                    ecP(n1a_ec[m]),plP(n1a_slot[m]),tpP(n1a_leaf[m]), nullptr,nullptr,nullptr);
-                else         kj_pre_node<<<GB,TB,0,st>>>(ns,Pn,ncat,/*eigOut=*/1,p_n1,d_upper+(size_t)u*slotSz,d_pmat+(size_t)u*ecStride,/*nsib=*/1,
+                kj_pre_node<<<GB,TB>>>(ns,Pn,ncat,/*eigOut=*/1,d_n1eig,d_upper+(size_t)u*slotSz,d_pmat+(size_t)u*ecStride,/*nsib=*/1,
                     ecP(n1a_ec[m]),plP(n1a_slot[m]),tpP(n1a_leaf[m]), nullptr,nullptr,nullptr);
             }
-            k1_node<<<GB,TB,0,st>>>(ns,Pn,ncat,/*isRoot=*/0,p_n2,p_pl,/*nchild=*/2,   // node2Eig (lower fold), already eigen
+            k1_node<<<GB,TB>>>(ns,Pn,ncat,/*isRoot=*/0,d_n2eig,d_patlh,/*nchild=*/2,   // node2Eig (lower fold), already eigen
                 ecP(n2a_ec[m]),plP(n2a_slot[m]),tpP(n2a_leaf[m]), ecP(n2b_ec[m]),plP(n2b_slot[m]),tpP(n2b_leaf[m]), nullptr,nullptr,nullptr);
+            GCK(cudaDeviceSynchronize());
             const double* dv0=d_valall+(size_t)m*3*ncat*ns;   // TS.2.1 K1: this move's precomputed table slice (no per-move g_val upload)
             if (useInv)   // A3 (+I): add the invariant term pinv*baseinvar[ptn]; non-+I path UNCHANGED (same kernel below)
-                k2_derv_mix_inv<<<GB,TB,0,st>>>(ns,Pn,ncat,p_n1,p_n2,dv0,dv0+ncat*ns,dv0+2*ncat*ns,pinv,d_baseinvar,p_pdf,p_pddf,p_pl);
+                k2_derv_mix_inv<<<GB,TB>>>(ns,Pn,ncat,d_n1eig,d_n2eig,dv0,dv0+ncat*ns,dv0+2*ncat*ns,pinv,d_baseinvar,d_pdf,d_pddf,d_patlh);
             else
-                k2_derv_mix<<<GB,TB,0,st>>>(ns,Pn,ncat,p_n1,p_n2,dv0,dv0+ncat*ns,dv0+2*ncat*ns,p_pdf,p_pddf,p_pl);
-        };
-        // ---- host Kahan gather of move m's per-pattern lnL row (Pn doubles) into (acc,accK), add order 0..Pn-1,
-        //      reading ptn_freq[pOff+p]*row[p]. `row` must hold the SAME floats k2 wrote (== legacy plchunk). ----
-        auto gatherRow = [&](const double* row, double& acc, double& accK){
-            double L=acc,k=accK; for(int p=0;p<Pn;p++){ double term=ptn_freq[pOff+p]*row[p], y=term-k, s=L+y; k=(s-L)-y; L=s; }
-            acc=L; accK=k; };
-
-        // ASYNC is gated to the bit-identical host-Kahan reduce only. TS_SCREEN_GPUREDUCE is a DIFFERENT (non
-        // bit-identical, default-OFF) reduce that changes summation order; do NOT combine the two — fall back to the
-        // legacy serial path so each reduce keeps its documented semantics. (Validation runs neither GPUREDUCE.)
-        if (g_ts_async && S>=1 && tsS && !TS_GPURED) {
-            // ASYNC PATH: round-robin move m -> stream s=m%S into slot s, async-D2H slot s's patlh into pinned row m,
-            // ONE sync after all moves in the chunk, THEN host Kahan gather over m in the EXACT existing order. The
-            // gather reads identical floats (same kernel math; async memcpy is bit-exact) => bit-identical to serial.
-            if (!ts_pin_ensure((size_t)nMoves*(size_t)chunk0)) { fprintf(stderr,"[TS-ASYNC] pinned staging alloc failed (%zu doubles)\n",(size_t)nMoves*(size_t)chunk0); return (double)NAN; }
-            // CHECK: snapshot the carried-in (pre-this-chunk) accumulators so the serial shadow re-derives the same
-            // per-chunk contribution from an identical baseline (the async gather below mutates accMove in place).
-            std::vector<double> chkBaseline, chkBaselineK;
-            if (g_ts_async_check) { chkBaseline=accMove; chkBaselineK=accMoveK; }
-            for (int m=0; m<nMoves; m++){
-                int s = m % S; cudaStream_t st = tsS[s];
-                launchMove(m, s, st);
-                double* p_pl  = d_patlh + (size_t)s*chunk0;
-                double* pinRow= g_ts_pin_patlh + (size_t)m*chunk0;
-                GCK(cudaMemcpyAsync(pinRow, p_pl, (size_t)Pn*sizeof(double), cudaMemcpyDeviceToHost, st));
-            }
-            for (int s=0;s<S;s++) GCK(cudaStreamSynchronize(tsS[s]));   // ONE sync barrier (per stream) for the chunk
-            GCK(cudaGetLastError());
-            // host Kahan gather in the existing fixed order m=0..nMoves-1, p=0..Pn-1 -> carried accMove[m]
-            for (int m=0; m<nMoves; m++) gatherRow(g_ts_pin_patlh+(size_t)m*chunk0, accMove[m], accMoveK[m]);
-
-            if (g_ts_async_check) {
-                // BIT-EXACT SHADOW CHECK: re-run each move the LEGACY serial way (default stream, slot 0) into
-                // accMove2 seeded from the carried-in baseline, then assert accMove==accMove2 bit-exact per move
-                // (modeled on the --ts-tile-check harness). Aborts with the offending m on mismatch. Re-runs from
-                // the SAME chunk-resident lowers/uppers (read-only, unchanged) — slot 0 device buffers are free to
-                // reuse here because the async results are already staged in the pinned rows.
-                for (int m=0; m<nMoves; m++){
-                    double acc2=chkBaseline[m], acc2K=chkBaselineK[m];   // carried-in value (pre this chunk)
-                    launchMove(m, 0, (cudaStream_t)0);                   // legacy: default stream, slot 0
-                    GCK(cudaDeviceSynchronize());
-                    cudaMemcpy(plchunk.data(), d_patlh, (size_t)Pn*sizeof(double), cudaMemcpyDeviceToHost);
-                    gatherRow(plchunk.data(), acc2, acc2K);
-                    if (memcmp(&accMove[m],&acc2,sizeof(double))!=0) {
-                        fprintf(stderr,"[TS-ASYNC-CHECK] BIT MISMATCH at move m=%d (chunk pOff=%d Pn=%d): async=%.17g serial=%.17g\n",
-                                m,pOff,Pn,accMove[m],acc2);
-                        abort();
-                    }
-                }
-                if (getenv("JOLT_DEBUG")) fprintf(stderr,"[TS-ASYNC-CHECK] chunk pOff=%d: %d/%d moves bit-identical (S=%d)\n",pOff,nMoves,nMoves,S);
-            }
-        } else if (g_ts_batchfold && !TS_GPURED) {
-            // ---- TS RAKE BATCH PATH: process moves in batches of B; each batch = ONE node1 + ONE node2 + ONE k2
-            //      launch over a (GB,nB) grid (blockIdx.y=local move) that fills the SMs, vs nB×3 tiny serial launches.
-            //      node1/node2 -> per-move eigen slots; k2 -> per-move patlh row; host Kahan gather in the EXACT serial
-            //      order (m ascending, p 0..Pn-1) => bit-identical. CHECK re-runs the serial path and asserts bit-exact. ----
-            std::vector<double> chkBaseline, chkBaselineK;
-            if (g_ts_batchfold_check) { chkBaseline=accMove; chkBaselineK=accMoveK; }
-            int B = g_ts_batchfold_B;
-            for (int bs=0; bs<nMoves; bs+=B){
-                int nB = (nMoves-bs < B) ? (nMoves-bs) : B;
-                dim3 grid(GB, nB);
-                screen_node1_batch<<<grid,TB>>>(ns,Pn,ncat,bs, d_n1batch,slotSz, d_echild,ecStride, d_partial,d_tip,
-                    d_upper,d_pmat, d_mv_u,d_mv_uIsRoot, d_n1a_ec,d_n1a_slot,d_n1a_leaf, d_n1b_ec,d_n1b_slot,d_n1b_leaf);
-                screen_node2_batch<<<grid,TB>>>(ns,Pn,ncat,bs, d_n2batch,slotSz, d_echild,ecStride, d_partial,d_tip,
-                    d_n2a_ec,d_n2a_slot,d_n2a_leaf, d_n2b_ec,d_n2b_slot,d_n2b_leaf);
-                GCK(cudaDeviceSynchronize());
-                screen_k2_batch<<<grid,TB>>>(ns,Pn,ncat,bs, d_n1batch,d_n2batch,slotSz, d_valall,d_patlhbatch,
-                    useInv?1:0, pinv, d_baseinvar);
-                GCK(cudaDeviceSynchronize()); GCK(cudaGetLastError());
-                GCK(cudaMemcpy(plbatch.data(), d_patlhbatch, (size_t)nB*Pn*sizeof(double), cudaMemcpyDeviceToHost));
-                for (int j=0;j<nB;j++) gatherRow(plbatch.data()+(size_t)j*Pn, accMove[bs+j], accMoveK[bs+j]);
-            }
-            if (g_ts_batchfold_check) {
-                for (int m=0;m<nMoves;m++){
-                    double acc2=chkBaseline[m], acc2K=chkBaselineK[m];
-                    launchMove(m, 0, (cudaStream_t)0);   // legacy serial re-run into slot 0
-                    GCK(cudaDeviceSynchronize());
-                    cudaMemcpy(plchunk.data(), d_patlh, (size_t)Pn*sizeof(double), cudaMemcpyDeviceToHost);
-                    gatherRow(plchunk.data(), acc2, acc2K);
-                    if (memcmp(&accMove[m],&acc2,sizeof(double))!=0) {
-                        fprintf(stderr,"[TS-BATCHFOLD-CHECK] BIT MISMATCH at move m=%d (chunk pOff=%d Pn=%d): batch=%.17g serial=%.17g\n",
-                                m,pOff,Pn,accMove[m],acc2);
-                        abort();
-                    }
-                }
-                if (getenv("JOLT_DEBUG")) fprintf(stderr,"[TS-BATCHFOLD-CHECK] chunk pOff=%d: %d/%d moves bit-identical (B=%d)\n",pOff,nMoves,nMoves,B);
-            }
-        } else {
-            // LEGACY SERIAL PATH (byte-identical to pre-async): default stream, single scratch, per-move sync+reduce.
-            for (int m=0; m<nMoves; m++){
-                int u=mv_u[m];
-                if (mv_uIsRoot[m]) {   // u==root: no upper -> k1_node({swapped-in child, root-leaf}) (eigen), unchanged
-                    k1_node<<<GB,TB>>>(ns,Pn,ncat,/*isRoot=*/0,d_n1eig,d_patlh,/*nchild=*/2,
-                        ecP(n1a_ec[m]),plP(n1a_slot[m]),tpP(n1a_leaf[m]), ecP(n1b_ec[m]),plP(n1b_slot[m]),tpP(n1b_leaf[m]), nullptr,nullptr,nullptr);
-                } else {               // interior u: node1Eig = Uinv·((P(b_u)·up_u) ⊙ (P(b_swapchild)·L_swapchild)), eigOut=1
-                    if(eigUpper) kj_pre<<<GB,TB>>>(ns,Pn,ncat,d_n1eig,d_upper+(size_t)u*slotSz,d_expfac+(size_t)u*exStride,/*nsib=*/1,
-                        ecP(n1a_ec[m]),plP(n1a_slot[m]),tpP(n1a_leaf[m]), nullptr,nullptr,nullptr);
-                    else         kj_pre_node<<<GB,TB>>>(ns,Pn,ncat,/*eigOut=*/1,d_n1eig,d_upper+(size_t)u*slotSz,d_pmat+(size_t)u*ecStride,/*nsib=*/1,
-                        ecP(n1a_ec[m]),plP(n1a_slot[m]),tpP(n1a_leaf[m]), nullptr,nullptr,nullptr);
-                }
-                k1_node<<<GB,TB>>>(ns,Pn,ncat,/*isRoot=*/0,d_n2eig,d_patlh,/*nchild=*/2,   // node2Eig (lower fold), already eigen
-                    ecP(n2a_ec[m]),plP(n2a_slot[m]),tpP(n2a_leaf[m]), ecP(n2b_ec[m]),plP(n2b_slot[m]),tpP(n2b_leaf[m]), nullptr,nullptr,nullptr);
-                GCK(cudaDeviceSynchronize());
-                const double* dv0=d_valall+(size_t)m*3*ncat*ns;   // TS.2.1 K1: this move's precomputed table slice (no per-move g_val upload)
-                if (useInv)   // A3 (+I): add the invariant term pinv*baseinvar[ptn]; non-+I path UNCHANGED (same kernel below)
-                    k2_derv_mix_inv<<<GB,TB>>>(ns,Pn,ncat,d_n1eig,d_n2eig,dv0,dv0+ncat*ns,dv0+2*ncat*ns,pinv,d_baseinvar,d_pdf,d_pddf,d_patlh);
-                else
-                    k2_derv_mix<<<GB,TB>>>(ns,Pn,ncat,d_n1eig,d_n2eig,dv0,dv0+ncat*ns,dv0+2*ncat*ns,d_pdf,d_pddf,d_patlh);
-                GCK(cudaDeviceSynchronize());
-                reduceInto(accMove[m],accMoveK[m]);
-            }
+                k2_derv_mix<<<GB,TB>>>(ns,Pn,ncat,d_n1eig,d_n2eig,dv0,dv0+ncat*ns,dv0+2*ncat*ns,d_pdf,d_pddf,d_patlh);
+            GCK(cudaDeviceSynchronize());
+            reduceInto(accMove[m],accMoveK[m]);
         }
-        if (g_kcount) g_kc_scr_fold += (long)nMoves*2;   // per-move folds: node1 + node2 partial launch per move (the dominant cost, NECESSARY — each scores a distinct NNI)
-    }
-    if (g_kcount) {
-        g_kc_scr_calls++;
-        long base=(long)nInternal*nTile, upper=(long)nInternal*nTile, fold=(long)nMoves*2*nTile;
-        long tot=base+upper+fold;
-        fprintf(stderr,"[TS-KCOUNT scr] call=%ld nInternal=%d nMoves=%d nTile=%d | base=%ld upper=%ld FOLD=%ld tot=%ld | fold%%=%.1f base+upper(shareable)%%=%.1f\n",
-                g_kc_scr_calls,nInternal,nMoves,nTile,base,upper,fold,tot, tot?100.0*fold/tot:0.0, tot?100.0*(base+upper)/tot:0.0);
-        fprintf(stderr,"[TS-KCOUNT cum] scr_base=%ld scr_upper=%ld scr_fold=%ld reopt_part=%ld (scr_calls=%ld reopt_calls=%ld)\n",
-                g_kc_scr_base,g_kc_scr_upper,g_kc_scr_fold,g_kc_reopt_part,g_kc_scr_calls,g_kc_reopt_calls);
     }
     if (out_move_lnL) for(int m=0;m<nMoves;m++) out_move_lnL[m]=accMove[m];
     if (out_tree_lnL) *out_tree_lnL=accTree;
@@ -2415,14 +1882,6 @@ static bool   g_jdiag = false;
 static double g_jd_echild_sec = 0.0;
 static long   g_jd_echild_n = 0;
 
-// JOLT_LBFGS_M (int env, default 0 = OFF): L-BFGS memory size for the per-round brlen reopt. 0 => the diagonal
-// LM path below is BYTE-IDENTICAL. >0 replaces ONLY the brlen step DIRECTION with an m-pair L-BFGS two-loop
-// recursion (initial Hessian H0 = diag(1/(|g_ddf|+eps)) — i.e. the SAME per-edge curvature the diagonal step uses,
-// not gamma*I), capturing the off-diagonal branch coupling the Jacobi/diagonal step ignores (rho~0.6 => ~12 iters).
-// Same MLE (same grad=0 stationary point), ~3-5 iters, ZERO new GPU work (the two-loop is host-side O(m*nedge)).
-static bool   g_lbfgs_init = false;
-static int    g_lbfgs_m = 0;
-
 extern "C" double gpu_jolt_optimize(
     int nstates, int nptn, int ncat, int ntax, int nnodes, int root,
     const double* Uinv, const double* UinvRowSum, const double* U, const double* eval,
@@ -2449,7 +1908,6 @@ extern "C" double gpu_jolt_optimize(
     // --jolt-diag (A3): init the gate + snapshot the per-call echild baseline INSIDE the lock, so the
     // across-model OpenMP concurrency (ModelFinder) can't tear the baseline read or race g_jdiag_init.
     if (!g_jdiag_init) { g_jdiag = (std::getenv("JOLT_DIAG") != nullptr); g_jdiag_init = true; }
-    if (!g_lbfgs_init) { const char* e=std::getenv("JOLT_LBFGS_M"); int m=e?atoi(e):0; g_lbfgs_m=(m<0)?0:((m>32)?32:m); g_lbfgs_init=true; }
     double _jd_ech0 = g_jd_echild_sec; long _jd_echn0 = g_jd_echild_n;
     // Inc 2 reopt proof-counters (JOLT_DEBUG): per-call tally of reopt coefficient uploads via the OFF path
     // (cudaMemcpyToSymbol of g_val0/1/2+g_rscale) vs the ON path (ONE cudaMemcpyAsync of [v0|v1|v2|rs] into the
@@ -2539,17 +1997,6 @@ extern "C" double gpu_jolt_optimize(
     size_t slotSz = (size_t)ncat*ns*nptn;            // current chunk's [cat][state][ptn] slot stride
     int    GB     = (nptn + TB - 1) / TB;            // current chunk's grid
     (void)pOff;
-
-    // ===== Inc 2 (async/streams ladder) reopt substrate =====
-    // The per-edge coefficient block staged contiguously as [v0|v1|v2|rs]: v0,v1,v2 each ncat*ns doubles, then rscale
-    // ncat. Under JOLT_TS_ASYNC the reopt sweep stages this block into a private valpool slot + ONE async H2D and runs
-    // kj_derv_fused_args (kernel-arg coeffs) instead of the per-edge cudaMemcpyToSymbol(g_val*/g_rscale)+kj_derv_fused.
-    // Inc 2 keeps reopt SERIAL (S=1, one slot, per-edge stream sync) — no overlap, no cross-edge d_rnum+= race; Inc 3
-    // round-robins. tsS/S are acquired ONCE here (lazy pool, mirrors the screener at the top of gpuScreenNNIRank); on
-    // any pool failure tsS==nullptr => every gated site below falls through to the BYTE-IDENTICAL legacy branch.
-    const int valBlk = 3*ncat*ns + ncat;             // doubles per reopt coeff block ([v0|v1|v2|rs])
-    cudaStream_t* tsS = nullptr; int S = 1;          // Inc 2: one active reopt slot (Inc 3 will raise S)
-    if (g_ts_async) { int poolK=0; tsS = ts_streams(&poolK); if(!tsS||poolK<1){ tsS=nullptr; } }
 
     DEVB(gbj_echild, (size_t)nnodes*ecStride*sizeof(double));
     DEVB(gbj_partial,(size_t)(nInternal>0?nInternal:1)*slotSzMax*sizeof(double));
@@ -2734,33 +2181,10 @@ extern "C" double gpu_jolt_optimize(
             int nch; const double* ec[3]; const double* p[3]; const unsigned char* tp[3]; childArgs(root,c0,nch,ec,p,tp);
             k1_node<<<GB,TB>>>(ns,Pn,ncat,0,d_pretmp,d_patlh,nch,ec[0],p[0],tp[0],ec[1],p[1],tp[1],ec[2],p[2],tp[2]); cudaDeviceSynchronize();
             const double* pl0=edgeNodePtr(c0); cudaDeviceSynchronize();   // part8 #3: fused — no theta materialisation
-            // Inc 2: evalLnL's base-edge derv is derv-ONLY (rnum=wnum=nullptr) — it never reads g_rscale. Under ON we
-            // host-build only v0/v1/v2 into the valpool slot's [v0|v1|v2] region (the rscale tail is left unread because
-            // kj_derv_fused_args dereferences drscale only when rnum!=nullptr) and run kj_derv_fused_args; OFF stays the
-            // BYTE-IDENTICAL setVal+kj_derv_fused. CHECK re-runs the legacy serial derv and memcmps (l) bit-exact.
+            // evalLnL's base-edge derv is derv-ONLY (rnum=wnum=nullptr).
             double l,d,dd;
-            if (g_ts_async && tsS && ts_valpool_ensure((size_t)S*valBlk)) {
-                cudaStream_t st=tsS[0]; double* vp=g_ts_valpool;   // slot 0 (reopt serial in Inc 2)
-                std::vector<double> v0(ncat*ns),v1(ncat*ns),v2(ncat*ns); setValBuild(brlen[c0],v0,v1,v2);
-                std::vector<double> hostVal(3*ncat*ns);
-                for(int j=0;j<ncat*ns;j++){ hostVal[j]=v0[j]; hostVal[ncat*ns+j]=v1[j]; hostVal[2*ncat*ns+j]=v2[j]; }
-                GCK(cudaMemcpyAsync(vp,hostVal.data(),(size_t)3*ncat*ns*sizeof(double),cudaMemcpyHostToDevice,st)); ts_reopt_vp++;
-                kj_derv_fused_args<<<GB,TB,0,st>>>(ns,Pn,ncat,pl0,d_pretmp,cand_pinv,d_baseinvar,d_patlh,d_pdf,d_pddf,nullptr,nullptr,
-                    vp, vp+ncat*ns, vp+2*ncat*ns, vp+3*ncat*ns);
-                GCK(cudaStreamSynchronize(st));
-                reduceDerv(l,d,dd);
-                if (g_ts_async_check) {
-                    double sl,sd,sdd; setVal(brlen[c0]); kj_derv_fused<<<GB,TB>>>(ns,Pn,ncat,pl0,d_pretmp,cand_pinv,d_baseinvar,d_patlh,d_pdf,d_pddf,nullptr,nullptr); cudaDeviceSynchronize();
-                    reduceDerv(sl,sd,sdd);
-                    if (memcmp(&l,&sl,sizeof(double))!=0) {
-                        fprintf(stderr,"[TS-ASYNC-CHECK] evalLnL BIT MISMATCH (chunk pOff=%d Pn=%d): async lnL=%.17g serial=%.17g\n",pOff,Pn,l,sl);
-                        abort();
-                    }
-                }
-            } else {
-                setVal(brlen[c0]); kj_derv_fused<<<GB,TB>>>(ns,Pn,ncat,pl0,d_pretmp,cand_pinv,d_baseinvar,d_patlh,d_pdf,d_pddf,nullptr,nullptr); cudaDeviceSynchronize();   // BYTE-IDENTICAL legacy
-                reduceDerv(l,d,dd);
-            }
+            setVal(brlen[c0]); kj_derv_fused<<<GB,TB>>>(ns,Pn,ncat,pl0,d_pretmp,cand_pinv,d_baseinvar,d_patlh,d_pdf,d_pddf,nullptr,nullptr); cudaDeviceSynchronize();
+            reduceDerv(l,d,dd);
             double y=l-Lk, s=Lacc+y; Lk=(s-Lacc)-y; Lacc=s;   // Kahan add this chunk's lnL contribution
         }
         devB=cand_b; devA=cand_a; devP=cand_pinv; devValid=true;   // part8 #2: echild matches this base (full postorder present on device only when nTile==1)
@@ -2797,7 +2221,6 @@ extern "C" double gpu_jolt_optimize(
             std::vector<int> freeSlots; for(int s=nPool-1;s>=0;s--) freeSlots.push_back(s);
             auto acq=[&](){int s=freeSlots.back();freeSlots.pop_back();return s;}; auto rls=[&](int s){freeSlots.push_back(s);};
             std::vector<double> dfC(nnodes,0.0),ddfC(nnodes,0.0); bool gotL=false; double lnLfirst=0;
-            long reoptEdges=0, reoptChkOk=0;   // Inc 2 S5: per-chunk reopt edge tally + CHECK bit-identical tally (mirrors the screener's per-chunk count)
             std::function<void(int,int)> proc=[&](int u,int su){
                 for(int v:child[u]){
                     int sv=acq(); double* pre=d_prepool+(size_t)sv*slotSz;
@@ -2806,53 +2229,14 @@ extern "C" double gpu_jolt_optimize(
                     else { const double* ec[2]={0,0}; const double* sp[2]={0,0}; const unsigned char* st[2]={0,0}; int nsb=0;
                         for(int w:child[u]){ if(w==v||nsb>=2) continue; sibArg(w,ec[nsb],sp[nsb],st[nsb]); nsb++; }
                         kj_pre<<<GB,TB>>>(ns,Pn,ncat,pre,d_prepool+(size_t)su*slotSz,d_expfac+(size_t)u*ncat*ns,nsb,ec[0],sp[0],st[0],ec[1],sp[1],st[1]); }
-                    if (g_kcount) g_kc_reopt_part++;   // reopt: one upper-partial launch (k1_node root / kj_pre interior) per edge per LM iter
                     cudaDeviceSynchronize();
                     const double* plv=edgeNodePtr(v);   // part8 #3: fused theta+derv+ratenum, no d_theta round-trip
                     double bv=brlen[v]; std::vector<double> rs(ncat); for(int c=0;c<ncat;c++) rs[c]=bv/(catRate[c]*catProp_v[c]);
-                    // Inc 2: gated reopt coeff delivery. ON => host-build [v0|v1|v2|rs], ONE async H2D into valpool slot
-                    // vp, kj_derv_fused_args (kernel-arg coeffs). OFF => BYTE-IDENTICAL legacy (memcpyToSymbol+setVal+
-                    // kj_derv_fused). vp is declared here so the shared +R wnum re-derv below can reuse THIS edge's slot
-                    // (the +R landmine: the legacy wnum kj_derv_fused reads __constant__ g_val0, which the ON path never
-                    // uploads -> stale; under ON we route the wnum re-derv through kj_derv_fused_args with the SAME vp).
-                    bool reoptAsync = (g_ts_async && tsS && ts_valpool_ensure((size_t)S*valBlk));
-                    double* vp = nullptr;
                     double l,d,dd;
-                    if (reoptAsync) {
-                        int s=0; cudaStream_t st=tsS[s];               // Inc 2: reopt still SERIAL; one slot. (Inc 3 round-robins.)
-                        vp = g_ts_valpool + (size_t)s*valBlk;
-                        std::vector<double> v0(ncat*ns),v1(ncat*ns),v2(ncat*ns); setValBuild(bv,v0,v1,v2);
-                        std::vector<double> hostVal(valBlk);           // stage contiguously [v0|v1|v2|rs] for ONE async copy
-                        for(int j=0;j<ncat*ns;j++){ hostVal[j]=v0[j]; hostVal[ncat*ns+j]=v1[j]; hostVal[2*ncat*ns+j]=v2[j]; }
-                        for(int c=0;c<ncat;c++) hostVal[3*ncat*ns+c]=rs[c];
-                        cudaMemcpyAsync(vp,hostVal.data(),(size_t)valBlk*sizeof(double),cudaMemcpyHostToDevice,st); ts_reopt_vp++;   // bare (NOT GCK): proc is std::function<void> — GCK's `return (double)NAN` would not typecheck; errors caught by the final cudaGetLastError() backstop
-                        kj_derv_fused_args<<<GB,TB,0,st>>>(ns,Pn,ncat,plv,pre,curPinv,d_baseinvar,d_patlh,d_pdf,d_pddf,d_rnum,nullptr,
-                            vp, vp+ncat*ns, vp+2*ncat*ns, vp+3*ncat*ns);
-                        cudaStreamSynchronize(st);                     // keep reopt serial in Inc 2 (no cross-edge d_rnum+= race)
-                        reduceDerv(l,d,dd);
-                        if (g_ts_async_check) {
-                            // S5 reopt CHECK shadow: re-run THIS edge the LEGACY serial way (constant memory + kj_derv_fused
-                            // on the default stream) into a shadow, then memcmp the reduced (l,d,dd) bit-exact. d_rnum was
-                            // already advanced by the async kernel above, so the shadow derv passes nullptr for rnum (it must
-                            // NOT double-accumulate); the (l,d,dd) channels come from d_patlh/d_pdf/d_pddf which the shadow
-                            // recomputes identically. Mismatch => print BIT MISMATCH + edge id and abort().
-                            double sl,sd,sdd; cudaMemcpyToSymbol(g_rscale,rs.data(),sizeof(double)*ncat); setVal(bv); cudaDeviceSynchronize();
-                            kj_derv_fused<<<GB,TB>>>(ns,Pn,ncat,plv,pre,curPinv,d_baseinvar,d_patlh,d_pdf,d_pddf,nullptr,nullptr); cudaDeviceSynchronize();
-                            reduceDerv(sl,sd,sdd);
-                            if (memcmp(&l,&sl,sizeof(double))!=0 || memcmp(&d,&sd,sizeof(double))!=0 || memcmp(&dd,&sdd,sizeof(double))!=0) {
-                                fprintf(stderr,"[TS-ASYNC-CHECK] reopt BIT MISMATCH at edge v=%d (chunk pOff=%d Pn=%d): async(l,d,dd)=%.17g,%.17g,%.17g serial=%.17g,%.17g,%.17g\n",
-                                        v,pOff,Pn,l,d,dd,sl,sd,sdd);
-                                abort();
-                            }
-                            reoptChkOk++;
-                        }
-                    } else {
-                        cudaMemcpyToSymbol(g_rscale,rs.data(),sizeof(double)*ncat); setVal(bv); cudaDeviceSynchronize();   // BYTE-IDENTICAL legacy
-                        kj_derv_fused<<<GB,TB>>>(ns,Pn,ncat,plv,pre,curPinv,d_baseinvar,d_patlh,d_pdf,d_pddf,d_rnum,nullptr); cudaDeviceSynchronize();
-                        ts_reopt_mcs += 1;   // Inc 2: OFF-path proof-counter for the per-edge g_rscale upload (setVal counts the 3 g_val* uploads)
-                        reduceDerv(l,d,dd);
-                    }
-                    reoptEdges++;
+                    cudaMemcpyToSymbol(g_rscale,rs.data(),sizeof(double)*ncat); setVal(bv); cudaDeviceSynchronize();
+                    kj_derv_fused<<<GB,TB>>>(ns,Pn,ncat,plv,pre,curPinv,d_baseinvar,d_patlh,d_pdf,d_pddf,d_rnum,nullptr); cudaDeviceSynchronize();
+                    ts_reopt_mcs += 1;   // OFF-path proof-counter for the per-edge g_rscale upload (setVal counts the 3 g_val* uploads)
+                    reduceDerv(l,d,dd);
                     dfC[v]=d; ddfC[v]=dd;
                     if(!gotL){ lnLfirst=l;
                         // G.5.0 Part B: 1/L_p on-device from the base-edge patlh (was a host D2H + exp loop over nptn).
@@ -2863,17 +2247,8 @@ extern "C" double gpu_jolt_optimize(
                         // BEFORE this derv overwrites d_patlh/d_pdf/d_pddf (already reduced for edge v at line above).
                         if(freeRate==1){
                             cudaMemset(d_wnum,0,(size_t)ncat*Pn*sizeof(double));
-                            // +R LANDMINE FIX: under ON the legacy kj_derv_fused (reading __constant__ g_val0) would read a
-                            // STALE g_val0 (the ON path never uploaded it). Route the wnum re-derv through kj_derv_fused_args
-                            // with THIS edge's still-resident vp (same [v0|v1|v2|rs] bytes) => bit-identical to the OFF path.
-                            if (reoptAsync) {
-                                cudaStream_t st=tsS[0];
-                                kj_derv_fused_args<<<GB,TB,0,st>>>(ns,Pn,ncat,plv,pre,curPinv,d_baseinvar,d_patlh,d_pdf,d_pddf,nullptr,d_wnum,
-                                    vp, vp+ncat*ns, vp+2*ncat*ns, vp+3*ncat*ns);
-                                cudaStreamSynchronize(st);   // bare (NOT GCK): proc returns void
-                            } else {
-                                kj_derv_fused<<<GB,TB>>>(ns,Pn,ncat,plv,pre,curPinv,d_baseinvar,d_patlh,d_pdf,d_pddf,nullptr,d_wnum); cudaDeviceSynchronize();
-                            }
+                            // +R: per-category likelihood Lc(p) re-derv with the wnum output (g_val0 still set for THIS edge).
+                            kj_derv_fused<<<GB,TB>>>(ns,Pn,ncat,plv,pre,curPinv,d_baseinvar,d_patlh,d_pdf,d_pddf,nullptr,d_wnum); cudaDeviceSynchronize();
                             kj_reduce_gradnum<<<GB,TB,(size_t)TB*sizeof(double)>>>(Pn,ncat,d_wnum,d_invLbase,d_ptnfreq,GB,d_redW);
                             cudaMemcpy(h_redW.data(),d_redW,(size_t)ncat*GB*sizeof(double),cudaMemcpyDeviceToHost);
                             for(int c=0;c<ncat;c++){ long double a=0; for(int b=0;b<GB;b++) a+=(long double)h_redW[(size_t)c*GB+b];
@@ -2881,11 +2256,6 @@ extern "C" double gpu_jolt_optimize(
                     if(leaf[v]<0) proc(v,sv); rls(sv);
                 } };
             proc(root,-1); cudaDeviceSynchronize();
-            // Inc 2 S5: per-chunk reopt CHECK summary (mirrors the screener's "[TS-ASYNC-CHECK] ... bit-identical").
-            // reoptChkOk counts edges where the async (l,d,dd) matched the legacy serial shadow bit-exact; any mismatch
-            // already abort()ed inside proc, so reaching here means reoptChkOk==reoptEdges.
-            if (g_ts_async && g_ts_async_check)
-                fprintf(stderr,"[TS-ASYNC-CHECK] reopt edges %ld/%ld bit-identical (chunk pOff=%d Pn=%d)\n",reoptChkOk,reoptEdges,pOff,Pn);
             // accumulate this chunk's per-edge df/ddf and base-edge lnL (Kahan):
             for(int e=0;e<nedge;e++){
                 double td=dfC[edgeV[e]];  { double y=td-accDfK[e],  s=accDf[e] +y; accDfK[e] =(s-accDf[e]) -y; accDf[e] =s; }
@@ -2952,32 +2322,9 @@ extern "C" double gpu_jolt_optimize(
     double mu=1.0, tol=1e-7; int it=0,nRej=0; bool conv=false;
     double aPrev=0,gaPrev=0; bool haveSec=false;
     double pPrev=0,gpPrev=0;   // G.4.3b: pinv secant curvature (mirrors the alpha secant)
-    // ---- L-BFGS state (brlen subvector, edge space) — JOLT_LBFGS_M>0; lbM=0 keeps the diagonal path byte-identical ----
-    const int    lbM   = (freeRate==1) ? 0 : g_lbfgs_m;   // G.5.1b: +R always uses the diagonal path (the L-BFGS brlen direction does NOT carry the y/z arms)
-    const double lbEps = 1e-9;                    // H0 = diag(1/(|g_ddf|+lbEps)); matches the diagonal-path mu floor
-    std::vector<std::vector<double>> lbS, lbY;    // ring buffer of (s,y) pairs, each length nedge (newest at back)
-    std::vector<double> lbRho;                    // 1/(y.s) per pair
-    std::vector<double> prevB, prevG;             // previous accepted iterate (edge space) + its g_df, for the next pair
-    std::vector<double> lbDir(lbM>0?nedge:0,0.0), lbQ(lbM>0?nedge:0,0.0), lbAlf;   // two-loop scratch
     for(it=1; it<=maxiter; it++){
         base=brlen; double baseA=curAlpha, baseP=curPinv; if(ncat>1 && !freeRate) applyAlpha(baseA);
         double lg,ga; computeGradient(lg,ga);
-        // L-BFGS history: form the (s,y) pair for the prev->current ACCEPTED-iterate transition, then save current as prev.
-        // ACTIVE-SET (red-team DEFECT B): exclude any edge at a brlen box bound at EITHER endpoint — its constrained
-        // gradient would otherwise inject a spurious large y_e that corrupts the free-edge direction for up to lbM iters.
-        if(lbM>0){
-            if(!prevB.empty()){
-                std::vector<double> s(nedge,0.0), y(nedge,0.0); double ys=0;
-                for(int e=0;e<nedge;e++){ double bnew=base[edgeV[e]];
-                    bool atBound = (bnew<=1e-6)||(bnew>=20.0)||(prevB[e]<=1e-6)||(prevB[e]>=20.0);
-                    if(!atBound){ s[e]=bnew-prevB[e]; y[e]=prevG[e]-g_df[e]; ys+=s[e]*y[e]; } }
-                if(ys>1e-12){   // curvature condition (SPD-preserving): push only a positively-curved pair
-                    if((int)lbS.size()>=lbM){ lbS.erase(lbS.begin()); lbY.erase(lbY.begin()); lbRho.erase(lbRho.begin()); }
-                    lbS.push_back(std::move(s)); lbY.push_back(std::move(y)); lbRho.push_back(1.0/ys); }
-            }
-            if((int)prevB.size()!=nedge){ prevB.assign(nedge,0.0); prevG.assign(nedge,0.0); }
-            for(int e=0;e<nedge;e++){ prevB[e]=base[edgeV[e]]; prevG[e]=g_df[e]; }
-        }
         // G.4.3b pinv gradient by FORWARD FINITE DIFFERENCE (robust to the rate<->prop<->pinv coupling that the
         // 1/(1-pinv) rate rescaling introduces; an analytic form would need the rate-derivative term). One extra
         // postorder lnL eval (cheap vs computeGradient's full preorder). lg = lnL at the base point (from above).
@@ -3023,37 +2370,7 @@ extern "C" double gpu_jolt_optimize(
         for(int k=0;k<nFreeQ;k++){ qPrev[k]=qcur[k]; gqPrev[k]=gradQ[k]; }
         haveSec=true;
         bool acc=false;
-        if(lbM>0){
-            // ---- L-BFGS brlen direction (computed ONCE; textbook step-length line search on t) — red-team DEFECT A fix:
-            // a real step length t (NOT the mu ladder), so t*dir->0 always reaches acceptance for the SPD-ascent dir
-            // (H_lbfgs is SPD when every stored y.s>0 and H0 SPD => g_df.dir>0 unless g_df==0, i.e. converged). ----
-            if(!lbS.empty()){
-                int K=(int)lbS.size(); lbAlf.assign(K,0.0);
-                for(int e=0;e<nedge;e++) lbQ[e]=g_df[e];                                   // seed q=+g_df (= -grad f); dir=r (no final negation)
-                for(int i=K-1;i>=0;i--){ const std::vector<double>& s=lbS[i]; double sdot=0; for(int e=0;e<nedge;e++) sdot+=s[e]*lbQ[e];
-                    double a=lbRho[i]*sdot; lbAlf[i]=a; const std::vector<double>& y=lbY[i]; for(int e=0;e<nedge;e++) lbQ[e]-=a*y[e]; }
-                for(int e=0;e<nedge;e++) lbDir[e]=lbQ[e]/(fabs(g_ddf[e])+lbEps);             // r = H0 . q
-                for(int i=0;i<K;i++){ const std::vector<double>& y=lbY[i]; double ydot=0; for(int e=0;e<nedge;e++) ydot+=y[e]*lbDir[e];
-                    double bb=lbRho[i]*ydot, ab=lbAlf[i]-bb; const std::vector<double>& s=lbS[i]; for(int e=0;e<nedge;e++) lbDir[e]+=ab*s[e]; }
-            } else {
-                for(int e=0;e<nedge;e++) lbDir[e]=g_df[e]/(fabs(g_ddf[e])+lbEps);            // empty history == the diagonal DIRECTION (lbEps-damped; iter-1 differs from the OFF mu-ladder by design)
-            }
-            // alpha/pinv/Q keep their diagonal+secant directions (computed once at the lbEps floor), scaled by the same t.
-            double daB=(optAlpha && ncat>1)? ga/(fabs(ddA)+lbEps):0.0;
-            double dpB=(optPinv)? gradPinv/(fabs(ddP)+lbEps):0.0;
-            std::vector<double> dqB(nFreeQ>0?nFreeQ:0,0.0);
-            for(int k=0;k<nFreeQ;k++) dqB[k]=gradQ[k]/(fabs(ddQ[k])+lbEps);
-            double t=1.0;
-            for(int bt=0; bt<30; bt++){
-                cand=base; for(int e=0;e<nedge;e++){ int v=edgeV[e]; double nb=base[v]+t*lbDir[e]; if(nb<1e-6)nb=1e-6; if(nb>20.0)nb=20.0; cand[v]=nb; }
-                double ca=baseA; if(optAlpha && ncat>1){ ca=baseA+t*daB; if(ca<0.02)ca=0.02; if(ca>50.0)ca=50.0; }
-                double cp=baseP; if(optPinv){ cp=baseP+t*dpB; if(cp<pinvMin)cp=pinvMin; if(cp>pinvMax)cp=pinvMax; }
-                std::vector<double> cq(nFreeQ>0?nFreeQ:0);
-                for(int k=0;k<nFreeQ;k++){ double nq=qcur[k]+t*dqB[k]; if(nq<MINQ)nq=MINQ; if(nq>MAXQ)nq=MAXQ; cq[k]=nq; }
-                double ln=evalLnL(cand,ca,cp, nFreeQ>0?cq.data():nullptr); nLnLEval++;
-                if(ln>lnL+1e-9){ double dl=ln-lnL; brlen=cand; curAlpha=ca; curPinv=cp; if(nFreeQ>0) qcur=cq; lnL=ln; acc=true; if(dl<tol)conv=true; break; }
-                else { t*=0.5; nRej++; } }
-        } else {
+        {
             for(int bt=0; bt<14; bt++){
                 cand=base; for(int e=0;e<nedge;e++){ int v=edgeV[e]; double dn=fabs(g_ddf[e])+mu; double nb=base[v]+g_df[e]/dn; if(nb<1e-6)nb=1e-6; if(nb>20.0)nb=20.0; cand[v]=nb; }
                 double ca=baseA; if(optAlpha && ncat>1){ double da=ga/(fabs(ddA)+mu); ca=baseA+da; if(ca<0.02)ca=0.02; if(ca>50.0)ca=50.0; }
@@ -3096,11 +2413,6 @@ extern "C" double gpu_jolt_optimize(
     // postorder over all internal nodes, discarded), nLnLEval = total evalLnL postorders. reject_frac = nRej/nLnLEval
     // measures the line-search-efficiency lever (the 2nd exact-ish surface on the 94% partials, distinct from maxiter).
     if(g_jdiag) printf("JOLT-DIAG-CU echild=%.6f n=%ld iters=%d nRej=%d nLnLEval=%ld nptn=%d\n", g_jd_echild_sec-_jd_ech0, g_jd_echild_n-_jd_echn0, it, nRej, nLnLEval, nptn);
-    // Inc 2 S6: direct proof the per-edge reopt constant-memory storm collapses under ON. OFF: memcpyToSymbol=NNN,
-    // valpool_async=0. ON: memcpyToSymbol=0, valpool_async=NNN (the 2.6M storm -> 0). JOLT_DEBUG-gated.
-    if(getenv("JOLT_DEBUG")) fprintf(stderr,"[TS-ASYNC] reopt memcpyToSymbol=%ld valpool_async=%ld\n", ts_reopt_mcs, ts_reopt_vp);
-    if (g_kcount) { g_kc_reopt_calls++;
-        fprintf(stderr,"[TS-KCOUNT reopt] call=%ld reopt_part_launches(cum)=%ld | cum: scr_base=%ld scr_upper=%ld scr_fold=%ld reopt_part=%ld -> shareable(base+upper+reopt-rebuild) vs FOLD(necessary)\n",
-                g_kc_reopt_calls,g_kc_reopt_part,g_kc_scr_base,g_kc_scr_upper,g_kc_scr_fold,g_kc_reopt_part); }
+    (void)ts_reopt_mcs; (void)ts_reopt_vp;
     return lnL;
 }
