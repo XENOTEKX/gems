@@ -927,7 +927,7 @@ void IQTree::initCandidateTreeSet(int nParTrees, int nNNITrees) {
         readTreeString(*it);
         if (it-initTreeStrings.begin() >= init_size) {
 #ifdef IQTREE_GPU
-            // TS.7 Phase-1: the per-initial-tree branch-length optimization (this loop, "Computing
+            // the per-initial-tree branch-length optimization (this loop, "Computing
             // log-likelihood of N initial trees") is ~25% of the tree-search wall and runs CPU-only on the
             // GPU node's few cores -> route it through the validated production GPU optimizer when --ts-fused
             // is engaged. NaN (JOLT-GATE decline / failure) -> CPU optimizeBranches fallback, so the retained
@@ -2495,7 +2495,7 @@ double IQTree::doTreeSearch() {
 
     double initCPUTime = getRealTime();
 
-    // TS.9 coarse-search: run the whole search on a seeded site-subsample (GPU cost is linear in nptn),
+    // coarse-search: run the whole search on a seeded site-subsample (GPU cost is linear in nptn),
     // then confirm/refine the best topology on the full alignment (the CTF analogue for tree search).
     Alignment *ts_full_aln = nullptr;
     if (params->ts_subsample > 0 && params->ts_fused
@@ -2566,7 +2566,7 @@ double IQTree::doTreeSearch() {
         // main search loop only (clears any ModelFinder/init-phase contributions to the counters).
         tsd_t_initcand = getRealTime() - initCPUTime;
         tsd_t_perturb = tsd_t_nnisearch = tsd_t_evalnni = tsd_t_optallbr = tsd_t_optmodel = tsd_t_mpi = 0.0;
-        tsd_t_fusedreopt = 0.0;   // TS.8-profile: separate the --ts-fused reopt from screener+bookkeeping
+        tsd_t_fusedreopt = 0.0;   // separate the --ts-fused reopt from screener+bookkeeping
         tsd_n_iter = tsd_n_branches_eval = tsd_n_positive = tsd_n_applied = tsd_n_derv = 0;
     }
     if (params->ts_reopt_split) {
@@ -2804,7 +2804,7 @@ double IQTree::doTreeSearch() {
         // RE-FIT THE MODEL on FULL data (+G alpha / +I pinvar / rates / freqs were fit to the S-site
         // subsample). doNNISearch's internal model re-opt is gated on candidateTrees.getBestScore() (still
         // sub-aln scores here, far less negative), so it never fires during the confirm -> we MUST re-fit
-        // explicitly, else the final lnL uses a subsample-fit model and FAILS the >= CPU-baseline bar. [red-team #1]
+        // explicitly, else the final lnL uses a subsample-fit model and FAILS the >= CPU-baseline bar.
         optimizeModelParameters(true, params->modelEps);
         curScore = optimizeAllBranches(2);
         cout << "TS.9 full-data confirmation (NNI to convergence)..." << endl;
@@ -3797,9 +3797,9 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
         sort(positiveNNIs.begin(), positiveNNIs.end());
 
         if (params->ts_fused) {
-            // ===== TS.6 INCREMENT 2 (--ts-fused): the PRODUCTION fused apply. positiveNNIs already carry screener
+            // ===== the PRODUCTION fused apply. positiveNNIs already carry screener
             // geometry + score (built in evaluateNNIsScreened with NO per-move nni5). This is the shadow-certified
-            // SELECTION rule (easy+hard PASS) over the FM-1-gated GEOMETRY source, with the JOLT-stand-in replaced by
+            // SELECTION rule (easy+hard PASS) over the -gated GEOMETRY source, with the JOLT-stand-in replaced by
             // the real GPU optimizeAllBranchesJOLT. Select old-length-positive (already filtered to gbest>curScore in
             // evaluateNNIsScreened), apply the compatible node-disjoint subset TOPOLOGY-ONLY, ONE global JOLT reopt,
             // round-level accept-or-rollback + single-best nni5 fallback (guarantees progress/termination via the stop
@@ -3809,7 +3809,7 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
                  [](const NNIMove &a, const NNIMove &b) { return a.preloglh > b.preloglh; });   // rank by screener score DESC
             appliedNNIs.clear();
             getCompatibleNNIs(positiveNNIs, appliedNNIs);
-            if (appliedNNIs.empty()) break;            // no surfaced old-length-positive move -> TS.6 stops (== shadow)
+            if (appliedNNIs.empty()) break;            // no surfaced old-length-positive move -> stops (== shadow)
             doNNIs(appliedNNIs, /*changeBran=*/false); // TOPOLOGY ONLY (swapped subtree keeps OLD length = JOLT warm start)
 #ifdef IQTREE_GPU
             double _tsdr = params->ts_diag ? getRealTime() : 0.0;
@@ -3857,28 +3857,28 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
                 // else: curScore stays oldScore -> the stop rule (curScore-oldScore<eps) breaks the loop (correct termination)
             }
         } else if (params->ts_shadow) {
-            // ===== TS.6 SHADOW (CPU emulation, --ts-shadow): FALSIFY red-team FM-5 BEFORE building TS.6 =====
-            // Select by OLD-LENGTH preloglh (the TS.6 apply gate that DROPS nni5 "late-bloomers"), apply the
+            // ===== SHADOW (CPU emulation, --ts-shadow): FALSIFY BEFORE building =====
+            // Select by OLD-LENGTH preloglh (the apply gate that DROPS nni5 "late-bloomers"), apply the
             // compatible node-disjoint subset TOPOLOGY-ONLY, ONE global optimizeAllBranches (the JOLT stand-in;
             // sweepIter=100 under --ts-shadow-converge brackets JOLT's converged strength), then a round-level
             // accept-or-rollback + single-best nni5 fallback (guarantees progress/termination via the stop rule
-            // below). COMMITS the rule => the final tree is a true TS.6 counterfactual whose final lnL is compared
-            // to the nni5 baseline. Does NOT test FM-1 (GPU geometry): node1Nei_it/node2Nei_it come CPU-correct
+            // below). COMMITS the rule => the final tree is a true counterfactual whose final lnL is compared
+            // to the nni5 baseline. Does NOT test  (GPU geometry): node1Nei_it/node2Nei_it come CPU-correct
             // from getBestNNIForBran (already in positiveNNIs).
             shadow_rounds++;
             int sweepIter = params->ts_shadow_converge ? 100 : 1;
             vector<NNIMove> shadowPos;
             for (size_t i = 0; i < positiveNNIs.size(); i++)
                 if (positiveNNIs[i].preloglh > curScore) shadowPos.push_back(positiveNNIs[i]);   // the OLD-LENGTH gate
-            shadow_latebloom_dropped += (long long)(positiveNNIs.size() - shadowPos.size());      // = newloglh-positive but old-length-flat (FM-5)
+            shadow_latebloom_dropped += (long long)(positiveNNIs.size() - shadowPos.size());      // = newloglh-positive but old-length-flat
             sort(shadowPos.begin(), shadowPos.end(),
                  [](const NNIMove &a, const NNIMove &b) { return a.preloglh > b.preloglh; });      // rank by preloglh DESC
             appliedNNIs.clear();
             getCompatibleNNIs(shadowPos, appliedNNIs);
-            if (appliedNNIs.empty()) break;   // no old-length-positive move -> TS.6 stops (late-bloomers uncaught)
+            if (appliedNNIs.empty()) break;   // no old-length-positive move -> stops (late-bloomers uncaught)
             // ===== LBR G1 (A+B): doNNIs uses changeBran=false (lengths unchanged by the swap, only re-labeled),
             // so we capture the reopt baseline lbr_lenBefore AFTER doNNIs -> its branch-ids are CONSISTENT with
-            // lbr_lenAfter for the |Δlen| diff (red-team MINOR-5: avoids comparing two DIFFERENT physical edges for
+            // lbr_lenAfter for the |deltalen| diff (avoids comparing two DIFFERENT physical edges for
             // the swapped pendant branches). Then multi-source BFS over node->neighbors on the post-swap topology:
             // seed dist=0 at every applied-NNI endpoint, relax neighbors +1 (dist indexed by node id). READ-ONLY.
             DoubleVector lbr_lenBefore;
@@ -3903,11 +3903,11 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
                 }
             }
             curScore = optimizeAllBranches(sweepIter, params->loglh_epsilon, PLL_NEWZPERCYCLE);    // global reopt = JOLT stand-in
-            // ===== LBR G1 (C): post-reopt lengths + per-branch |Δlen| and bucket-distance. Traverse the tree ONCE
+            // ===== LBR G1 (C): post-reopt lengths + per-branch |deltalen| and bucket-distance. Traverse the tree ONCE
             // (lbrCollectEdges mirrors saveBranchLengths) to recover each branch id + its two endpoint node ids.
             // dlen[id] indexed strictly by branch id (shared by both half-edges); bd[id] = min endpoint BFS dist.
             DoubleVector lbr_lenAfter;
-            vector<double> lbr_dlen;  // |Δlen| per branch id (reopt-attributable displacement)
+            vector<double> lbr_dlen;  // |deltalen| per branch id (reopt-attributable displacement)
             vector<int>    lbr_bd;    // graph distance of each branch to nearest applied NNI
             if (params->ts_lbr_measure) {
                 saveBranchLengths(lbr_lenAfter);
@@ -3956,7 +3956,7 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
                         cout << "LBR-DIST step=" << numSteps << " bin=" << b << " n=" << binN[b]
                              << " moved=" << binMoved[b] << " mean_dlen=" << mean_dlen << endl;
                     }
-                    // af-sensitivity: re-threshold the SAME |Δlen| array at delta in {1e-6,1e-5,1e-4}
+                    // af-sensitivity: re-threshold the SAME |deltalen| array at delta in {1e-6,1e-5,1e-4}
                     long m6 = 0, m5 = 0, m4 = 0;
                     for (int id = 0; id < branchNum; id++) {
                         double d = lbr_dlen[id];
@@ -3994,10 +3994,10 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
 
         // --ts-reopt-split recall@k (TS-C3 gate): would a top-k pre-reopt screener recover the APPLIED set?
         // Rank candidates by screener score (preloglh); for each applied move count how many positives the
-        // screener ranks strictly above it. tsk_applied_prepos (preΔ>0) is the recall CEILING for a pre-reopt
-        // screener (false_pos≡0 makes "preΔ>0 ⇒ true positive" exact). curScore here = round baseline.
-        // Caveat: ranks are over positiveNNIs not all branches; for preΔ≤0 applied moves this is a lower
-        // bound on the true rank (slightly optimistic), but those moves sit below every preΔ>0 positive anyway.
+        // screener ranks strictly above it. tsk_applied_prepos (predelta>0) is the recall CEILING for a pre-reopt
+        // screener (false_pos==0 makes "predelta>0 => true positive" exact). curScore here = round baseline.
+        // Caveat: ranks are over positiveNNIs not all branches; for predelta<=0 applied moves this is a lower
+        // bound on the true rank (slightly optimistic), but those moves sit below every predelta>0 positive anyway.
         if (params->ts_reopt_split && !appliedNNIs.empty()) {
             static const int KS[6] = {1, 2, 4, 8, 16, 32};
             bool any = false;
@@ -4019,7 +4019,7 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
         doNNIs(appliedNNIs);
         double _tsda = params->ts_diag ? getRealTime() : 0.0;
 #ifdef IQTREE_GPU
-        // TS.1 (reborn / L1): lean in-loop JOLT all-branch reopt. NaN (ineligible regime / CUDA error) -> exact CPU fallback.
+        // lean in-loop JOLT all-branch reopt. NaN (ineligible regime / CUDA error) -> exact CPU fallback.
         if (params->ts_jolt_allbr) {
             double _jlnl = optimizeAllBranchesJOLT();
             curScore = (_jlnl == _jlnl) ? _jlnl
@@ -4393,16 +4393,16 @@ void IQTree::evaluateNNIs(Branches &nniBranches, vector<NNIMove>  &positiveNNIs)
 }
 
 #ifdef IQTREE_GPU
-// TS.2 Integration Step 1 (--ts-screen-drive) / Step 2 (--ts-screen-topk): the GPU-screener-driven NNI front-end.
+// (--ts-screen-drive) / Step 2 (--ts-screen-topk): the GPU-screener-driven NNI front-end.
 // Step 1 (side-validator, BYTE-IDENTICAL): run the lean per-round screener once, then refine getBestNNIForBran on
 // EVERY branch in nniBranches in the SAME ORDER as evaluateNNIs (the screener ranking is computed but DISCARDED),
 // validating per branch that the CPU winner preloglh == one of the GPU's 2 swap lnLs. Step 2 (ts_screen_topk>0):
-// refine only the top-k branches by GPU score; skip the rest (trajectory may differ — gated by recall + final lnL).
+// refine only the top-k branches by GPU score; skip the rest (trajectory may differ -- gated by recall + final lnL).
 // On screener ineligibility/CUDA error -> pure CPU evaluateNNIs (byte-identical). evaluateNNIs is left untouched
 // (it is also called for nonNNIBranches and from other paths); the dispatch is only at the main optimizeNNI site.
 void IQTree::evaluateNNIsScreened(Branches &nniBranches, vector<NNIMove> &positiveNNIs) {
     // ROOT-CAUSE FIX (ground-truth 172201742): the GPU screener roots its own DFS at root->neighbors[0]->node,
-    // but getBestNNIForBran orients node1 via the `direction` field — which is STALE relative to the current root
+    // but getBestNNIForBran orients node1 via the `direction` field -- which is STALE relative to the current root
     // (setRootNode does not recompute it for unrooted trees), so the two rootings are INVERTED for ~all branches and
     // the upper-folding move reconstructs the mirror rearrangement. Re-rooting `direction` at the current root makes
     // getBestNNIForBran's node1 == the GPU's u (root->neighbors[0] side). SAFE on the reversible path: `direction`
@@ -4459,11 +4459,11 @@ void IQTree::evaluateNNIsScreened(Branches &nniBranches, vector<NNIMove> &positi
         for (int i = 0; i < k; i++) topkSet.insert(rk[i].second);
     }
 
-    // ===== TS.6 INCREMENT 2 (--ts-fused): build positiveNNIs from the SCREENER, NO per-move nni5 (the 78.6% surface). =====
+    // ===== build positiveNNIs from the SCREENER, NO per-move nni5 (the 78.6% surface). =====
     // For each top-k-surfaced branch: geometry from enumerateNNIGeometry, winning side w = the screener's argmax(g0,g1)
-    // (FM-1-gated: the screener's g0/g1 map to cnt0/cnt1), score = max(g0,g1). The OLD-LENGTH-positive gate max(g0,g1)>
+    // (-gated: the screener's g0/g1 map to cnt0/cnt1), score = max(g0,g1). The OLD-LENGTH-positive gate max(g0,g1)>
     // curScore matches the shadow's preloglh>curScore (the SELECTION rule certified easy+hard). HYBRID (--ts-fused-topm M>0):
-    // the M highest-scoring surfaced branches still take EXACT nni5 (getBestNNIForBran) -> recovers late-bloomers (FM-5
+    // the M highest-scoring surfaced branches still take EXACT nni5 (getBestNNIForBran) -> recovers late-bloomers (rate-heterogeneity
     // insurance); M=0 = pure fused. RETURNS before the refine loop, so per-move nni5 is eliminated for the fused set.
     if (params->ts_fused) {
         int M = params->ts_fused_nni5_topm;
@@ -4492,12 +4492,12 @@ void IQTree::evaluateNNIsScreened(Branches &nniBranches, vector<NNIMove> &positi
             std::map<int,std::pair<double,double> >::iterator bb = branchBoth.find(fid);
             if (bb == branchBoth.end()) continue;      // unmapped: screener has no score -> skip (CPU owns nothing here)
             double g0 = bb->second.first, g1 = bb->second.second;
-            // RED-TEAM F2: require BOTH swaps finite. The FM-1 gate PROVES the g<->cnt index mapping only on TWO-SIDED
+            // RED-TEAM F2: require BOTH swaps finite. The validation gate PROVES the g<->cnt index mapping only on TWO-SIDED
             // branches; a one-sided (single-NaN) branch's geometry is UNVERIFIED (could be the mirror), and one-sided
             // moves are outside the shadow-certified envelope (the shadow scored both swaps via CPU nni5). Skip them ->
             // never apply unverified geometry. (Rare: one-sided = a GPU-ineligible swap; recoverable via later rounds.)
             if (g0 != g0 || g1 != g1) { tsfused_onesided++; continue; }
-            int w = (g0 >= g1) ? 0 : 1;                  // matches the FM-1 gate's argmax (g0>=g1)?0:1 exactly
+            int w = (g0 >= g1) ? 0 : 1;                  // matches the validation gate's argmax (g0>=g1)?0:1 exactly
             double gbest = (w == 0) ? g0 : g1;
             if (gbest <= curScore) continue;            // OLD-LENGTH-positive gate (== shadow preloglh>curScore)
             NNIMove geo[2]; enumerateNNIGeometry(fn1, fn2, geo);
@@ -4518,7 +4518,7 @@ void IQTree::evaluateNNIsScreened(Branches &nniBranches, vector<NNIMove> &positi
 
         NNIMove nni = getBestNNIForBran(n1, n2, nullptr);
 
-        // TS.6 FM-1 GATE (--ts-fused-check): prove enumerateNNIGeometry reconstructs the SAME 2 swaps as nni5 AND that
+        // GATE (--ts-fused-check): prove enumerateNNIGeometry reconstructs the SAME 2 swaps as nni5 AND that
         // the screener's g0/g1 map to cnt0/cnt1 (so a fused apply of out[g0>=g1?0:1] is the screener's WINNING swap,
         // not the mirror). Validation only: applies nothing, the search proceeds on the CPU 'nni' winner as normal.
         if (params->ts_fused_check) {

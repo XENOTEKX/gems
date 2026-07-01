@@ -20,7 +20,7 @@
  *   59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.             *
  ***************************************************************************/
 #include "phylotree.h"
-#include <iqtree_config.h>   // IQTREE_GPU (Phase G.2.0a cross-check hook guard)
+#include <iqtree_config.h>   // IQTREE_GPU (cross-check hook guard)
 #include "utils/starttree.h"
 #include "utils/progress.h"  //for progress_display
 //#include "rateheterogeneity.h"
@@ -110,9 +110,9 @@ void PhyloTree::init() {
     dist_matrix = nullptr;
     var_matrix = nullptr;
     params = nullptr;
-    cpuComputeLikelihoodBranchPointer = nullptr;       // G.2.0b: saved CPU Branch ptr (set by setLikelihoodKernelGPU); inert when GPU off
-    cpuComputeLikelihoodDervPointer = nullptr;         // G.2.1b: saved CPU Derv ptr
-    cpuComputeLikelihoodFromBufferPointer = nullptr;   // G.2.1b: saved CPU FromBuffer ptr
+    cpuComputeLikelihoodBranchPointer = nullptr;       // saved CPU Branch ptr (set by setLikelihoodKernelGPU); inert when GPU off
+    cpuComputeLikelihoodDervPointer = nullptr;         // saved CPU Derv ptr
+    cpuComputeLikelihoodFromBufferPointer = nullptr;   // saved CPU FromBuffer ptr
     setLikelihoodKernel(LK_SSE2);  // FOR TUNG: you forgot to initialize this variable!
     setNumThreads(1);
     num_threads = 0;
@@ -1142,7 +1142,7 @@ void PhyloTree::initializeAllPartialLh(int &index, int &indexlh, PhyloNode *node
 #ifdef __linux__
             // Promote central_partial_lh to 2 MB transparent huge pages.
             // Reduces TLB misses on the partial_lh sweep: ~1.57M 4 KB PTEs
-            // (AA 1M) → 3,135 2 MB PTEs — fits in STLB. Gain: 8-15% MF wall
+            // (AA 1M) -> 3,135 2 MB PTEs -- fits in STLB. Gain: 8-15% MF wall
             // on AA 1M+ (DRAM-bandwidth + TLB-bound workload). Patch 0004.
             madvise(central_partial_lh, mem_size * sizeof(double), MADV_HUGEPAGE);
 #endif
@@ -4201,7 +4201,7 @@ void PhyloTree::changeNNIBrans(NNIMove &nnimove) {
     }
 }
 
-// TS.6: geometry-only NNI enumeration — the lifted prefix of getBestNNIForBran (orient + FOR_NEIGHBOR_IT), with NO
+// geometry-only NNI enumeration -- the lifted prefix of getBestNNIForBran (orient + FOR_NEIGHBOR_IT), with NO
 // reopt, NO partial-LH allocation, NO likelihood. Produces the SAME 2 moves (node1Nei_it/node2Nei_it) in the SAME
 // order as getBestNNIForBran's fresh-enumeration branch (phylotree.cpp:4303-4322), so out[cnt] == nniMoves[cnt] and
 // (on the eligible reversible path with direction force-synced) the screener's g0/g1 == cnt0/cnt1. --ts-fused-check
@@ -4209,7 +4209,7 @@ void PhyloTree::changeNNIBrans(NNIMove &nnimove) {
 void PhyloTree::enumerateNNIGeometry(PhyloNode *node1, PhyloNode *node2, NNIMove out[2]) {
     ASSERT(!node1->isLeaf() && !node2->isLeaf());
     ASSERT(node1->degree() == 3 && node2->degree() == 3);
-    // orient node1 to the non-TOWARD_ROOT (rootward) side — identical to getBestNNIForBran (:4209)
+    // orient node1 to the non-TOWARD_ROOT (rootward) side -- identical to getBestNNIForBran (:4209)
     if (((PhyloNeighbor*)node1->findNeighbor(node2))->direction == TOWARD_ROOT) {
         PhyloNode *tmp = node1; node1 = node2; node2 = tmp;
     }
@@ -4391,8 +4391,8 @@ NNIMove PhyloTree::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2, NNIMove
         reorientPartialLh(node21_it, node2);
 
 #ifdef IQTREE_GPU
-        // TS.2 Increment 2/3a: NON-MUTATING screeners on the still-UNMUTATED tree, BEFORE the physical swap below
-        // (both stateless — build their own arrays, no partial_lh/length writes). g2 = the I2 swap-aware oracle
+        ///3a: NON-MUTATING screeners on the still-UNMUTATED tree, BEFORE the physical swap below
+        // (both stateless -- build their own arrays, no partial_lh/length writes). g2 = the I2 swap-aware oracle
         // (descriptor re-pointing), needed by both checks. g3 = the I3a resident-postorder + re-pairing fold; it is
         // compared to g2 DIRECTLY here (self-contained). I2's g2-vs-CPU comparison happens post-swap (needs tsr_pre).
         double g2_pre = (double)NAN;
@@ -4435,7 +4435,7 @@ NNIMove PhyloTree::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2, NNIMove
         // read (no length write, no theta_computed set), and the normal path below re-clears
         // node12_it/node21_it and the reopt overwrites theta before line ~4381 => result-invariant.
         // Skipped under LM_MEM_SAVE: the extra traversal can reorder mem-slot eviction and hence FP
-        // summation order (numerically equivalent, but not guaranteed byte-identical). B6 diagnostic
+        // summation order (numerically equivalent, but not guaranteed byte-identical). diagnostic
         // runs are never -mem-capped, so this costs nothing; it keeps the flag provably invariant.
         if (params->ts_reopt_split && params->lh_mem_save != LM_MEM_SAVE) {
             node12_it->clearPartialLh();
@@ -4444,12 +4444,12 @@ NNIMove PhyloTree::getBestNNIForBran(PhyloNode *node1, PhyloNode *node2, NNIMove
         }
 
 #ifdef IQTREE_GPU
-        // TS.2 Increment 1 (--ts-screen-check): in-situ GPU clean-room lnL of THIS swapped topology @ OLD
-        // lengths (swap already applied) vs the CPU oracle tsr_pre[cnt]. TS.2 Increment 2 (--ts-screen2-check):
+        // (--ts-screen-check): in-situ GPU reference lnL of THIS swapped topology @ OLD
+        // lengths (swap already applied) vs the CPU oracle tsr_pre[cnt]. (--ts-screen2-check):
         // the NON-MUTATING virtual screener g2_pre (computed PRE-swap above) vs tsr_pre[cnt] (the gate) AND vs
         // the in-situ helper glnL (same descriptors => expect BIT-EXACT; isolates an encoding bug from a
         // shared GPU-path bug). gpuComputeEdgeDervCleanRoom is STATELESS; NaN = GPU-ineligible (+I / mixture /
-        // non-rev / ns∉{4,20}) -> excluded.
+        // non-rev / ns not in {4,20}) -> excluded.
         if ((params->ts_screen_check || params->ts_screen2_check) && tsr_pre[cnt] > -DBL_MAX) {
             double gddf = 0.0, glnL = (double)NAN;
             gpuComputeEdgeDervCleanRoom(node12_it, node1, &gddf, &glnL);

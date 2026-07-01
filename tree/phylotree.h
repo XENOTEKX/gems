@@ -1638,8 +1638,8 @@ public:
      */
     virtual NNIMove getBestNNIForBran(PhyloNode *node1, PhyloNode *node2, NNIMove *nniMoves = nullptr);
 
-    /** TS.6 (--ts-fused / --ts-fused-check): reconstruct the 2 NNI swaps' GEOMETRY (node1Nei_it/node2Nei_it +
-        node1/node2) for an inner branch WITHOUT the nni5 reopt — the lifted geometry prefix of getBestNNIForBran
+    /** (--ts-fused / --ts-fused-check): reconstruct the 2 NNI swaps' GEOMETRY (node1Nei_it/node2Nei_it +
+        node1/node2) for an inner branch WITHOUT the nni5 reopt -- the lifted geometry prefix of getBestNNIForBran
         (orient + the FOR_NEIGHBOR_IT enumeration). out[0]/out[1] equal getBestNNIForBran's nniMoves[0]/[1] BY
         CONSTRUCTION (same enumeration, same NeighborVec order). Lets the fused path APPLY the screener-winning swap
         (out[ g0>=g1 ? 0 : 1 ], the mi==cnt mapping proven on the eligible reversible path + validated by
@@ -2096,52 +2096,52 @@ public:
 #endif
     virtual void setLikelihoodKernelSSE();
 
-    /** Phase G.8.0/G.8.1: clean-room GPU whole-tree lnL for a PROFILE MIXTURE (regimes r=m*ncat+c, per-class eigen via
+    /** reference GPU whole-tree lnL for a PROFILE MIXTURE (regimes r=m*ncat+c, per-class eigen via
         the ModelMixture component accessors). If out_lhcat != nullptr it is filled with the per-class likelihood
-        L_{p,m} = w_m·Σ_c catProp_c·L_{p,m,c} laid out [nmix][nptn] (G.8.1, the EM-weight numerator). Returns NaN for
-        non-mixtures / fused / PMSF / +I / ns∉{4,20} / CUDA error. */
+        L_{p,m} = w_m*sum_c catProp_c*L_{p,m,c} laid out [nmix][nptn] (the EM-weight numerator). Returns NaN for
+        non-mixtures / fused / PMSF / +I / ns not in {4,20} / CUDA error. */
     double gpuComputeTreeLnLCleanRoomMix(double *out_patlh, double *out_lhcat = nullptr, const double *w_override = nullptr,
                                          const double *parentLenOverride = nullptr, double alphaOverride = -1.0,
                                          double pinvOverride = -1.0);   // A1 (+I): >=0 selects a trial pinv; <0 uses the stored pinv
 
-    /** Phase G.2.0b: reusable clean-room GPU whole-tree log-likelihood. Rebuilds the validated K1 eigen-space
+    /** reusable reference GPU whole-tree log-likelihood. Rebuilds the validated K1 eigen-space
         postorder sweep from the LIVE model/site_rate/tree/alignment and returns the ptn_freq-weighted total
         log-likelihood. If out_patlh != nullptr it is filled with the per-pattern log|lh_ptn| (aln->size()
         entries, pattern order). Returns NaN if the regime is unsupported (non-reversible / mixture /
-        site-specific / num_states∉{4,20}) or a CUDA error occurs — callers fall back to CPU. Defined only in
+        site-specific / num_states not in {4,20}) or a CUDA error occurs -- callers fall back to CPU. Defined only in
         tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
     double gpuComputeTreeLnLCleanRoom(double *out_patlh);
 
-    /** Phase G.4.2: GPU JOLT joint-gradient optimiser entry for ONE candidate model. Replaces IQ-TREE's
+    /** GPU JOLT joint-gradient optimiser entry for ONE candidate model. Replaces IQ-TREE's
         per-edge Gauss-Seidel optimizeAllBranches + alpha-Brent with a single joint LM diagonal-Newton loop over
-        (all branches + gamma alpha), run on the GPU (gpu_jolt_optimize). Builds the clean-room inputs from the
+        (all branches + gamma alpha), run on the GPU (gpu_jolt_optimize). Builds the reference inputs from the
         LIVE model/site_rate/tree/alignment, runs the optimiser, writes the optimised branch lengths + alpha back
         through the cache-invalidating setters (setGammaShape + clearAllPartialLH), and self-checks that a fresh
         CPU computeLikelihood() reproduces the JOLT lnL (rel <= 1e-9). Returns the optimised lnL, or NaN if the
-        regime is JOLT-ineligible / a CUDA error occurs — the caller (ModelFactory::optimizeParameters) then falls
+        regime is JOLT-ineligible / a CUDA error occurs -- the caller (ModelFactory::optimizeParameters) then falls
         back to the standard CPU/stateless-GPU path. Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
     double optimizeParametersJOLT(int fixed_len, bool brlenOnly = false, bool leanTail = false, int brlenMaxIter = 400);
 
-    /** TS.1 (reborn / L1): lean in-loop JOLT all-branch reopt — the GPU replacement for optimizeAllBranches(1) in the
+    /** lean in-loop JOLT all-branch reopt -- the GPU replacement for optimizeAllBranches(1) in the
         NNI search loop (the optallbranches 19.5% surface). Thin wrapper over optimizeParametersJOLT with brlenOnly=true
         (model params held FIXED: optAlpha=optPinv=nFreeQ=0; only branch lengths move) and leanTail=true (write back
-        brlens, clearAllPartialLH flag-flip, trust the device lnL — NO full CPU computeLikelihood() self-check, the
+        brlens, clearAllPartialLH flag-flip, trust the device lnL -- NO full CPU computeLikelihood() self-check, the
         ModelFinder-only D4 gain-eraser). NOT bit-exact (JOLT converges harder than a single CPU sweep). Returns the
         device lnL, or NaN -> caller falls back to optimizeAllBranches(1). Defined only under #ifdef IQTREE_GPU.
-        DEFAULT maxiter=2 (was 12) — for the --ts-fused GPU search path only (the 4 callers; CPU search unaffected).
+        DEFAULT maxiter=2 (was 12) -- for the --ts-fused GPU search path only (the 4 callers; CPU search unaffected).
         An INTERMEDIATE NNI topology's reopt need not converge to 1e-7 (the topology changes next round). VALIDATED
         (RF==0 + dlnL<=1e-3 vs maxiter=12): AA-100K (sweep 172400909) + DNA-200tx GTR+G (172409440) DIRECTLY; AA-200tx
-        LG+G4 INFERRED (mi1 tied at +0.0000, mi2⊆mi1 in convergence — the mi2 arm was not run). ~2.5× wall (AA-100K
-        1712→690s, beats Hashara 812s). HONEST CAVEATS: (1) the final best tree is CPU-reconverged
+        LG+G4 INFERRED (mi1 tied at +0.0000, mi2 subset of mi1 in convergence -- the mi2 arm was not run). ~2.5x wall (AA-100K
+        1712->690s). HONEST CAVEATS: (1) the final best tree is CPU-reconverged
         (optimizeModelParameters->optimizeAllBranches) ONLY on modelEps-improving rounds (iqtree.cpp:3565); on other
         rounds the registered lnL is the JOLT-capped value, so a lower cap can shift the FINAL lnL by O(1e-3) at FIXED
-        topology — DNA-200tx mi2 dlnL=-0.0008 (RF==0). Scientifically negligible (~7e-11 rel, << any BIC threshold),
+        topology -- DNA-200tx mi2 dlnL=-0.0008 (RF==0). Scientifically negligible (~7e-11 rel, << any BIC threshold),
         but real. (2) UNTESTED: trajectory-divergence (no escape dataset escaped in validation) + multi-seed (all
         seed 1). Owed before this graduates beyond the --ts-fused research path. JOLT_BRLEN_MAXITER env overrides
-        (>0 caps, <0 skips→CPU; default-2 is byte-identical to env=2). */
+        (>0 caps, <0 skips->CPU; default-2 is byte-identical to env=2). */
     double optimizeAllBranchesJOLT(int maxiter = 2);
 
-    /** Phase G.8.2.2: GPU JOLT optimiser for NON-FUSED PROFILE-MIXTURE models (C20/C30/C60/MEOW...). The mixture
+    /** GPU JOLT optimiser for NON-FUSED PROFILE-MIXTURE models (C20/C30/C60/MEOW...). The mixture
         analogue of optimizeParametersJOLT, dispatched from ModelFactory::optimizeParameters under --jolt when
         getNMixtures()>1. Optimises (all branches + gamma alpha) on the GPU over the regime axis r=m*ncat+c, holding
         the class WEIGHTS FIXED (eligibility gate model->getNDim()==0 => fix_prop && no free per-class freq/Q params),
@@ -2149,29 +2149,29 @@ public:
         optimised lnL, or NaN if the regime is ineligible / a CUDA error occurs. Defined only under #ifdef IQTREE_GPU. */
     double optimizeParametersJOLTMix(int fixed_len);
 
-    /** Phase G.2.0b: GPU override for computeLikelihoodBranchPointer (byte-matches ComputeLikelihoodBranchType).
-        Returns the whole-tree lnL via gpuComputeTreeLnLCleanRoom (reversible ⇒ branch-independent), mirrors the
+    /** GPU override for computeLikelihoodBranchPointer (byte-matches ComputeLikelihoodBranchType).
+        Returns the whole-tree lnL via gpuComputeTreeLnLCleanRoom (reversible => branch-independent), mirrors the
         per-pattern values into _pattern_lh[] and zeroes the branch lh_scale_factor (NORM_LH) so the downstream
         computeLogLVariance/computePatternLikelihood produce the correct s.e.; delegates to the saved CPU Branch
         pointer if the per-call gate fails. Installed only under the narrow -blfix lnL-only gate. */
     double computeLikelihoodBranchGPU(PhyloNeighbor *dad_branch, PhyloNode *dad, bool save_log_value);
 
-    /** Phase G.2.0b: gated hook called LAST in setLikelihoodKernel. Saves the ISA-set CPU Branch pointer and
+    /** gated hook called LAST in setLikelihoodKernel. Saves the ISA-set CPU Branch pointer and
         overrides computeLikelihoodBranchPointer with the GPU version (idempotent; re-applied on every funnel
         re-invocation). No-op unless the narrow lnL-only gate holds (gpu && fixed_branch_length==BRLEN_FIX &&
-        num_states∈{4,20} && !supertree && no -wsl/-wpl/-alrt/-abayes/-b/-bb/-asr/dating/pll). */
+        num_states in {4,20} && !supertree && no -wsl/-wpl/-alrt/-abayes/-b/-bb/-asr/dating/pll). */
     void setLikelihoodKernelGPU();
 
-    /** Phase G.2.0b: saved CPU Branch pointer for fallback (set by setLikelihoodKernelGPU; nulled in init()). */
+    /** saved CPU Branch pointer for fallback (set by setLikelihoodKernelGPU; nulled in init()). */
     ComputeLikelihoodBranchType cpuComputeLikelihoodBranchPointer;
 
-    /** Phase G.2.1a: clean-room single-edge branch-length derivative for edge (dad_branch->node, dad). Builds two
+    /** reference single-edge branch-length derivative for edge (dad_branch->node, dad). Builds two
         directed sub-sweeps split by the central edge (stateless), returns df = d(lnL)/dt (un-negated), *out_ddf
         the 2nd derivative, *out_lnL the tree lnL at the central length. NaN if unsupported (leaf endpoint /
-        non-reversible / mixture / num_states∉{4,20}). Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
+        non-reversible / mixture / num_states not in {4,20}). Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
     double gpuComputeEdgeDervCleanRoom(PhyloNeighbor *dad_branch, PhyloNode *dad, double *out_ddf, double *out_lnL);
 
-    /** TS.2 Increment 2: NON-MUTATING NNI screener. Scores the swapped topology (node1_nei<->node2_nei
+    /** NON-MUTATING NNI screener. Scores the swapped topology (node1_nei<->node2_nei
         exchanged across the central node1-node2 edge) @ OLD branch lengths from the UNMUTATED tree, via
         descriptor re-pointing (NO physical doNNI). Builds EXPLICIT recorded adjacency (not n->neighbors)
         so the virtual swap is honored; reuses gpuComputeEdgeDervCleanRoom's two-sub-root machinery and
@@ -2182,16 +2182,16 @@ public:
                                  PhyloNeighbor *node1_nei, PhyloNeighbor *node2_nei,
                                  double *out_ddf, double *out_lnL);
 
-    /** TS.2 Increment 3a: RESIDENT-POSTORDER + RE-PAIRING-FOLD screener. Scores the same NNI-swapped topology @
+    /** RESIDENT-POSTORDER + RE-PAIRING-FOLD screener. Scores the same NNI-swapped topology @
         OLD lengths as gpuScreenNNICleanRoom, but from ONE resident postorder over the PHYSICAL tree + a
-        re-pairing fold (two k1_node folds + k2_derv re-grouping the 4 surrounding subtrees) — NO swap-aware DFS,
+        re-pairing fold (two k1_node folds + k2_derv re-grouping the 4 surrounding subtrees) -- NO swap-aware DFS,
         NO new kernel. The perf-core primitive for the batched L2 screener. *out_lnL == gpuScreenNNICleanRoom to
         1e-9. Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
     double gpuScreenNNIFoldCleanRoom(PhyloNode *node1, PhyloNode *node2,
                                      PhyloNeighbor *node1_nei, PhyloNeighbor *node2_nei,
                                      double *out_ddf, double *out_lnL);
 
-    /** TS.2 Increment 3b-i: PERSISTENT-UPPER preorder validator. ONE fixed-root postorder (resident lowers) + ONE
+    /** PERSISTENT-UPPER preorder validator. ONE fixed-root postorder (resident lowers) + ONE
         preorder with a persistent per-node upper buffer; checks the invariant that every internal edge's lnL =
         k2_derv(lower_v, pre_v, b_v) equals the whole-tree lnL (reversible). Validates the persistent-upper substrate
         3b-ii's re-pairing reuses. Returns false if ineligible / CUDA error. Defined only in tree/phylotreegpu.cpp
@@ -2199,7 +2199,7 @@ public:
     bool gpuAllBranchUpperCheckCleanRoom(double *out_max_rel, long long *out_nedge, long long *out_npass,
                                          long long *out_nbitexact, double *out_tree_lnL);
 
-    /** TS.2 Increment 3b-ii: BATCHED re-pairing NNI screener. ONE fixed-root postorder + persistent-upper preorder
+    /** BATCHED re-pairing NNI screener. ONE fixed-root postorder + persistent-upper preorder
         (built once), then scores every inner branch's 2 NNI moves as cheap folds off the resident state; cross-checks
         each move vs gpuScreenNNIFoldCleanRoom (the 3a oracle) and times the batch vs the M per-move oracle calls.
         Returns false if ineligible / no moves. Out: max rel-err vs 3a, #moves, #pass@1e-9, tree lnL, and the two
@@ -2207,33 +2207,33 @@ public:
     bool gpuScreenNNIBatchCleanRoom(double *out_max_rel, long long *out_nmove, long long *out_npass,
                                     double *out_tree_lnL, double *out_wall_batched, double *out_wall_oracle);
 
-    /** TS.2 Increment 3c: PATTERN-TILED batched NNI screener (--ts-tile-check). Same enumeration as the 3b-ii
+    /** PATTERN-TILED batched NNI screener (--ts-tile-check). Same enumeration as the 3b-ii
         batched driver but the launcher tiles nptn so the persistent per-node upper fits at AA-1M. THE GATE: every
         tiled move == the untiled 3a oracle to 1e-9 (works at all scales). BONUS (example scale, nTile=1 fits):
-        the auto-tiled per-move lnLs are BIT-IDENTICAL to forced nTile∈{3,7} and to the frozen 3b-ii batch launcher.
+        the auto-tiled per-move lnLs are BIT-IDENTICAL to forced nTile in {3,7} and to the frozen 3b-ii batch launcher.
         Out: max rel-err, #moves, #pass@1e-9, tree lnL, the two wall times, the auto-picked nTile, and the
         bit-identity count (-1 = skipped because nTile=1 OOMs). Defined only under #ifdef IQTREE_GPU. */
     bool gpuScreenNNITileCleanRoom(double *out_max_rel, long long *out_nmove, long long *out_npass,
                                    double *out_tree_lnL, double *out_wall_tiled, double *out_wall_oracle,
                                    int *out_ntile, long long *out_bitexact, long long *out_nmoves_total);
 
-    /** TS.2 Integration Step 1: LEAN per-round NNI screener (the search front-end). Same build + 2-move enumeration
+    /** LEAN per-round NNI screener (the search front-end). Same build + 2-move enumeration
         as gpuScreenNNITileCleanRoom but ONE auto-tiled launch (no oracle, no bit-identity). Fills branchBest[id] =
         max(swap0,swap1) GPU fixed-length lnL and (opt) branchBoth[id] = (swap0,swap1), keyed by
-        pairInteger(parentNode->id, childNode->id) — the SAME key the CPU nniBranches use. Each lnL == the CPU
-        tsr_pre/preloglh (3a→3c-validated). Returns false on ineligibility / no moves / CUDA error (caller falls
-        back to pure CPU evaluateNNIs, byte-identical). Rebuilt every call (live lengths) — never cache.
+        pairInteger(parentNode->id, childNode->id) -- the SAME key the CPU nniBranches use. Each lnL == the CPU
+        tsr_pre/preloglh (3a->3c-validated). Returns false on ineligibility / no moves / CUDA error (caller falls
+        back to pure CPU evaluateNNIs, byte-identical). Rebuilt every call (live lengths) -- never cache.
         Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
     bool gpuScreenNNIRank(std::map<int,double> &branchBest,
                           std::map<int,std::pair<double,double> > *branchBoth,
                           int *out_ntile, double *out_wall_screen);
 
-    /** Phase G.8.1b: clean-room single-edge df/ddf for a PROFILE MIXTURE (df/ddf summed over N*ncat regimes).
+    /** reference single-edge df/ddf for a PROFILE MIXTURE (df/ddf summed over N*ncat regimes).
         Returns df=d(lnL)/dt (un-negated); *out_ddf, *out_lnL. NaN if unsupported (single-model / +I / fused /
-        PMSF / non-reversible / num_states∉{4,20}). Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
+        PMSF / non-reversible / num_states not in {4,20}). Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
     double gpuComputeEdgeDervCleanRoomMix(PhyloNeighbor *dad_branch, PhyloNode *dad, double *out_ddf, double *out_lnL);
 
-    /** Phase G.8.2.1a: clean-room ALL-BRANCH df/ddf for a PROFILE MIXTURE (Ji-2020 linear-time: one postorder + one
+    /** reference ALL-BRANCH df/ddf for a PROFILE MIXTURE (Ji-2020 linear-time: one postorder + one
         preorder sweep -> every edge). Fills four parallel out-vectors per non-root node v (edge v->parent):
         childNodes=v, parentNodes=parent, dfOut=d(lnL)/db_v, ddfOut=2nd deriv. Returns false on ineligibility/CUDA
         error (same gate as the lnL mix path). Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
@@ -2243,15 +2243,15 @@ public:
                                              double pinvOverride = -1.0);   // A1 (+I)
 
 
-    /** Phase G.2.1b: GPU override for computeLikelihoodDervPointer (byte-matches ComputeLikelihoodDervType).
-        Stateless clean-room single-edge df/ddf via gpuComputeEdgeDervCleanRoom; un-negated; CPU fallback on NaN. */
+    /** GPU override for computeLikelihoodDervPointer (byte-matches ComputeLikelihoodDervType).
+        Stateless reference single-edge df/ddf via gpuComputeEdgeDervCleanRoom; un-negated; CPU fallback on NaN. */
     void computeLikelihoodDervGPU(PhyloNeighbor *dad_branch, PhyloNode *dad, double *df, double *ddf);
 
-    /** Phase G.2.1b: GPU override for computeLikelihoodFromBufferPointer (byte-matches the no-arg typedef).
-        Stateless clean-room whole-tree lnL at the current branch lengths; CPU fallback on NaN. */
+    /** GPU override for computeLikelihoodFromBufferPointer (byte-matches the no-arg typedef).
+        Stateless reference whole-tree lnL at the current branch lengths; CPU fallback on NaN. */
     double computeLikelihoodFromBufferGPU();
 
-    /** Phase G.2.1b: saved CPU Derv / FromBuffer pointers for fallback (set by setLikelihoodKernelGPU; nulled in init()). */
+    /** saved CPU Derv / FromBuffer pointers for fallback (set by setLikelihoodKernelGPU; nulled in init()). */
     ComputeLikelihoodDervType       cpuComputeLikelihoodDervPointer;
     ComputeLikelihoodFromBufferType cpuComputeLikelihoodFromBufferPointer;
 
@@ -2338,7 +2338,7 @@ public:
 	//   top-level (doTreeSearch main loop): perturb + nnisearch + mpi  (+ one-time initcand)
 	//   sub-phases nested inside nnisearch: evalnni + optallbr + optmodel
 	double tsd_t_perturb, tsd_t_nnisearch, tsd_t_evalnni, tsd_t_optallbr, tsd_t_optmodel, tsd_t_mpi, tsd_t_initcand;
-	double tsd_t_fusedreopt = 0.0;   // TS.8-profile: the --ts-fused optimizeAllBranchesJOLT reopt wall (legacy tsd_t_optallbr reads 0 in fused)
+	double tsd_t_fusedreopt = 0.0;   // the --ts-fused optimizeAllBranchesJOLT reopt wall (legacy tsd_t_optallbr reads 0 in fused)
 	long long tsd_n_iter, tsd_n_branches_eval, tsd_n_positive, tsd_n_applied, tsd_n_derv;
 
 	// --ts-reopt-split accumulators (B6; gated by params->ts_reopt_split; zero-cost when off).
@@ -2348,27 +2348,27 @@ public:
 	double tsr_gain_sum, tsr_gain_abs_sum, tsr_gain_max;
 
 	// --ts-reopt-split recall@k (the L2 screener gate, TS-C3): over each optimizeNNI round, rank the
-	// candidate moves by screener Δ (preloglh-cur) and ask how many of the APPLIED moves a top-k
+	// candidate moves by screener delta (preloglh-cur) and ask how many of the APPLIED moves a top-k
 	// pre-filter would recover. tsk_recall[i] for k = {1,2,4,8,16,32}. tsk_applied_prepos = applied
-	// moves with preΔ>0 (the recall CEILING for a pre-reopt screener; false_pos≡0 makes this exact).
+	// moves with predelta>0 (the recall CEILING for a pre-reopt screener; false_pos==0 makes this exact).
 	long long tsk_applied, tsk_applied_prepos, tsk_rounds, tsk_recall[6];
-	// TS.6 SHADOW (--ts-shadow): committed TS.6-rule counterfactual diagnostics
+	// SHADOW (--ts-shadow): committed counterfactual diagnostics
 	long long shadow_rounds, shadow_rejects, shadow_applied_total, shadow_fallbacks, shadow_latebloom_dropped;
-	// LBR G1 (--ts-lbr-measure; read-only): per-ACCEPTED-round affected-fraction af = #{|Δlen|>delta}/branchNum.
+	// LBR G1 (--ts-lbr-measure; read-only): per-ACCEPTED-round affected-fraction af = #{|deltalen|>delta}/branchNum.
 	// Aggregated (median over rounds) into the G1 verdict in the ts_shadow report block. Zero-cost when off.
 	std::vector<double> lbr_af;
-	// TS.6 --ts-fused-check (FM-1 gate): per-branch geometry + screener mi==cnt mapping validation
+	// --ts-fused-check (validation gate): per-branch geometry + screener mi==cnt mapping validation
 	long long tsf_branches, tsf_checked, tsf_two_sided, tsf_geom_pass, tsf_index_pass, tsf_argmax_pass;
 	double tsf_max_rel;
-	// TS.6 INCREMENT 2 (--ts-fused): production fused apply diagnostics (surfaced = screener-positive geometry moves
+	// production fused apply diagnostics (surfaced = screener-positive geometry moves
 	// pushed without per-move nni5; hybrid = top-M branches that still took exact nni5; rejects/fallbacks = round rollback)
 	long long tsfused_rounds, tsfused_applied_total, tsfused_rejects, tsfused_fallbacks, tsfused_surfaced, tsfused_hybrid, tsfused_onesided;
 
-	// TS.2 Increment 1: GPU clean-room screener-lnL vs CPU pre-reopt cross-check (--ts-screen-check; GPU build).
+	// GPU reference screener-lnL vs CPU pre-reopt cross-check (--ts-screen-check; GPU build).
 	long long tsc_n, tsc_elig, tsc_pass;   // moves checked / GPU-eligible (non-NaN) / |rel|<=1e-9
 	double tsc_max_rel;
 
-	// TS.2 Increment 2: NON-MUTATING GPU screener (gpuScreenNNICleanRoom) cross-check (--ts-screen2-check; GPU build).
+	// NON-MUTATING GPU screener (gpuScreenNNICleanRoom) cross-check (--ts-screen2-check; GPU build).
 	//   tsc2_* : pre-swap virtual screener lnL vs CPU pre-reopt oracle tsr_pre (the gate; relative <=1e-9).
 	//   tsc2_vs_gpu_* : same virtual lnL vs the in-situ post-swap GPU helper (isolates an encoding bug from a
 	//                   shared GPU-path bug). vs_gpu_pass = rel<=1e-9 (the robust bar: child-DESCRIPTOR ORDER
@@ -2380,25 +2380,25 @@ public:
 	long long tsc2_vs_gpu_n, tsc2_vs_gpu_pass, tsc2_vs_gpu_bitexact;
 	double tsc2_vs_gpu_max_rel;
 
-	// TS.2 Increment 3a: resident-postorder + re-pairing-fold screener (gpuScreenNNIFoldCleanRoom) cross-check
+	// resident-postorder + re-pairing-fold screener (gpuScreenNNIFoldCleanRoom) cross-check
 	// (--ts-screen3-check; GPU build). g3 (fold) vs g2 (the trusted I2 swap-aware oracle), per NNI move.
 	//   tsc3_pass = rel<=1e-9 (THE GATE); tsc3_bitexact = info (sub-1.0 w/ rel<=~1e-13 = benign fold-order FP).
 	long long tsc3_n, tsc3_elig, tsc3_pass, tsc3_bitexact;
 	double tsc3_max_rel;
 
-	// TS.2 Increment 3b-i: persistent-upper preorder validator (--ts-upper-check; GPU build). One-shot per
+	// persistent-upper preorder validator (--ts-upper-check; GPU build). One-shot per
 	// doTreeSearch (guarded by tsu_done). Invariant: every internal edge's k2_derv lnL == the whole-tree lnL.
 	bool tsu_done;
 
-	// TS.2 Increment 3b-ii: batched re-pairing screener (--ts-batch-check; GPU build). One-shot (tsb_done).
-	// Every inner-branch NNI move scored off ONE shared sweep, cross-checked vs the 3a oracle + timed vs M× it.
+	// batched re-pairing screener (--ts-batch-check; GPU build). One-shot (tsb_done).
+	// Every inner-branch NNI move scored off ONE shared sweep, cross-checked vs the 3a oracle + timed vs Mx it.
 	bool tsb_done;
 
-	// TS.2 Increment 3c: PATTERN-TILED batched screener (--ts-tile-check; GPU build). One-shot (tst_done).
+	// PATTERN-TILED batched screener (--ts-tile-check; GPU build). One-shot (tst_done).
 	// Tiles nptn so the persistent upper fits at AA-1M; gates tiled==3a oracle (1e-9) + bit-identity to nTile=1.
 	bool tst_done;
 
-	// TS.2 Integration Step 1: screener-driven NNI front-end (--ts-screen-drive; GPU build). Per-round (NOT
+	// screener-driven NNI front-end (--ts-screen-drive; GPU build). Per-round (NOT
 	// one-shot) accumulators for the TS-DRIVE report: the screener runs each NNI round as a PURE side-validator
 	// (CPU branch order preserved, ranking discarded => byte-identical), and per round asserts the CPU winner
 	// preloglh == one of the GPU's 2 swap lnLs. Reset at doTreeSearch start; reported at its end.

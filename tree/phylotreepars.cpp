@@ -11,7 +11,7 @@
 //#include "vectorclass/vectorclass.h"
 #include "phylosupertree.h"
 #ifdef IQTREE_GPU
-#include "tree/gpu/gpu_iqtree.h"   // TS.8: gpu_parsimony_score_branches (A) + set_leaves/build_and_score (B)
+#include "tree/gpu/gpu_iqtree.h"   // gpu_parsimony_score_branches (A) + set_leaves/build_and_score (B)
 #include <vector>
 #include <atomic>
 #include <cstdio>
@@ -19,8 +19,8 @@
 #include <functional>
 #include <algorithm>
 #include <chrono>
-// TS.8 Phase-B timing breakdown (env JOLT_PARS_TIMING; OFF by default => byte-identical). Picks the v2 lever:
-// produce-schedule (host) vs gpu-call (H2D+launches+sync+kernel, mutex-serialized so sum≈wall) vs CPU fallback steps.
+// Phase-B timing breakdown (env JOLT_PARS_TIMING; OFF by default => byte-identical). Picks the v2 lever:
+// produce-schedule (host) vs gpu-call (H2D+launches+sync+kernel, mutex-serialized so sum~=wall) vs CPU fallback steps.
 static std::atomic<long long> g_pb_ns_produce{0}, g_pb_ns_gpucall{0};
 static std::atomic<long long> g_pb_steps_engaged{0}, g_pb_steps_fallback{0};
 struct PbTimingDump { ~PbTimingDump() {
@@ -1197,7 +1197,7 @@ int PhyloTree::computeParsimonyTree(const char *out_prefix, Alignment *alignment
         outWarning("Constraint tree has all taxa and is bifurcating, which strictly enforces final tree!");
     }
 
-    // ===================== TS.8 Phase-B: device-resident parsimony (recompute-from-resident-leaves) =====================
+    // ===================== Phase-B: device-resident parsimony (recompute-from-resident-leaves) =====================
     // Replaces Phase-A's per-insertion partial H2D. Leaf bit-packs are tree-independent, so we upload each taxon's
     // pack ONCE (as it enters the tree) into a device-resident buffer; per insertion the device rebuilds every
     // directed internal partial from those leaves and scores all candidates (no partial H2D). Gated, CPU-byte-identical.
@@ -1295,7 +1295,7 @@ int PhyloTree::computeParsimonyTree(const char *out_prefix, Alignment *alignment
 
         bool gpu_pars_done = false;
 #ifdef IQTREE_GPU
-        // ===================== TS.8 Phase-B: recompute-from-resident-leaves =====================
+        // ===================== Phase-B: recompute-from-resident-leaves =====================
         // Rebuild every DIRECTED internal partial of the CURRENT tree from the resident leaves (two-pass produce,
         // level-scheduled) and score all candidates in one orchestrator call (no partial H2D). Bit-identical to the
         // CPU addTaxonMPFast/computeParsimonyBranchFast. Fenced to the non-constraint strictly-bifurcating path.
