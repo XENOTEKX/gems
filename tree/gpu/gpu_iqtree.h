@@ -217,7 +217,7 @@ double gpu_screen_nni_batch_crosscheck(
    persistent per-node upper buffer is sized to chunk0, not nptn, fitting larger
    alignments in VRAM. Per-move lnL is a continuous carried Kahan sum over chunks,
    so the result is bit-identical to nTile=1 for any nTile.
-   @param forced_ntile >0 forces nTile (0 = auto from free VRAM; JOLT_NTILE env overrides auto)
+   @param forced_ntile >0 forces nTile (0 = auto from free VRAM; IQTREE_GPU_NTILE env overrides auto)
    @param out_move_lnL out: per-move swapped-topology lnL
    @param out_tree_lnL out: whole-tree lnL
    @param out_ntile    out: chosen nTile

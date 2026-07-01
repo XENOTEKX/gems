@@ -2920,15 +2920,15 @@ public:
     bool gpu;
 
     /**
-     *  TRUE to use the GPU joint-gradient optimiser (set by --jolt; requires --gpu).
+     *  TRUE to use the GPU joint-gradient optimiser (set by --gpu-joint; requires --gpu).
      *  Replaces the per-edge Gauss-Seidel branch-opt + alpha-Brent with a single joint LM
      *  diagonal-Newton step over (all branches + alpha) for joint-optimiser-eligible candidates
      *  (fixed-Q reversible model, ns in {4,20}, no +I, gamma-only or no rate het). Default false.
      */
-    bool jolt;
+    bool gpu_joint;
 
     /**
-     *  TRUE to run native CTF (coarse-to-fine) ModelFinder (set by --ctf; implies --jolt --gpu).
+     *  TRUE to run native CTF (coarse-to-fine) ModelFinder (set by --ctf; implies --gpu-joint --gpu).
      *  Ranks ALL candidate models on a small subsample (native subsample-BIC), then refines the
      *  top-k on the full data with the coarse topology fixed, and picks the best full-data BIC.
      *  Default false.
@@ -2958,10 +2958,10 @@ public:
         Adds one extra per-NNI-move likelihood eval; result-invariant; off by default. */
     bool ts_reopt_split;
 
-    /** TRUE to emit host-rebuild-cost timing for optimizeParametersGpuJoint (set by --jolt-diag). Also exports
-        env JOLT_DIAG so the CUDA TU can gate the echild timer. Result-invariant (timers + printf only);
-        off by default. */
-    bool jolt_diag;
+    /** TRUE to emit host-rebuild-cost timing for optimizeParametersGpuJoint (set by --gpu-joint-diag). Also
+        exports env IQTREE_GPU_DIAG so the CUDA TU can gate the echild timer. Result-invariant (timers + printf
+        only); off by default. */
+    bool gpu_joint_diag;
 
     /** TRUE to cross-check the GPU reference screener lnL against the CPU pre-reopt score per NNI move
         (set by --ts-screen-check; implies --ts-reopt-split; GPU build only).

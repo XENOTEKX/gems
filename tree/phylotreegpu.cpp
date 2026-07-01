@@ -42,7 +42,7 @@ using namespace std;
 // lock), and ModelFinder scores candidate models OpenMP-parallel across models. Without this, concurrent JOLTMix
 // calls would race the single GPU's constant memory, so JOLTMix serializes on the one GPU; ineligible candidates
 // still run N-parallel on the CPU.
-static std::mutex gpu_mixjolt_mtx;
+static std::mutex gpu_mixjoint_mtx;
 
 // ============================================================================================================
 // Reusable whole-tree log-likelihood on the GPU. Silent (invoked once per Branch evaluation): returns NaN on any
@@ -1864,13 +1864,13 @@ double PhyloTree::computeLikelihoodFromBufferGPU() {
 // ============================================================================================================
 void PhyloTree::setLikelihoodKernelGPU() {
     if (!params || !params->gpu) return;
-    // Under --jolt the stateless GPU Branch/Derv/FromBuffer overrides must NOT install. joint-optimiser is the only GPU path:
+    // Under --gpu-joint the stateless GPU Branch/Derv/FromBuffer overrides must NOT install. joint-optimiser is the only GPU path:
     // it replaces ModelFactory::optimizeParameters wholesale for eligible candidates (+G/base), while ineligible
     // candidates (+I, +R, +FO, mixture) must fall back to the pure CPU likelihood (normal speed), not the slow
     // stateless GPU sweep. Keeping both active would (a) make the +I/+R tail run on the slow stateless path
     // (timeout) and (b) reduce optimizeParametersGpuJoint's self-check to GPU-vs-GPU; with this no-op the self-check's
     // computeLikelihood() is a genuine CPU recompute.
-    if (params->jolt) return;
+    if (params->gpu_joint) return;
     if (!aln || (aln->num_states != 4 && aln->num_states != 20)) return;
     if (isSuperTree()) return;
     // reject regimes whose output reads per-pattern/-category buffers the GPU overrides do not populate
@@ -1912,7 +1912,7 @@ void PhyloTree::setLikelihoodKernelGPU() {
 // internal Q updates leaving the model in any particular state).
 // ============================================================================================================
 namespace { struct JoltQCtx { ModelSubst* model; int ns; }; }
-extern "C" void jolt_qdecompose_intree(void* vctx, const double* q, double* eval, double* U, double* Uinv) {
+extern "C" void gpu_qdecompose_intree(void* vctx, const double* q, double* eval, double* U, double* Uinv) {
     JoltQCtx* c = reinterpret_cast<JoltQCtx*>(vctx);
     c->model->gpuSetFreeParamsDecompose(q);
     int ns = c->ns;
@@ -1929,10 +1929,10 @@ extern "C" void jolt_qdecompose_intree(void* vctx, const double* q, double* eval
 // ============================================================================================================
 double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool leanTail, int brlenMaxIter) {
     // ---- eligibility gate (fixed-Q reversible, ns in {4,20}, no +I, gamma-or-uniform) ----
-    // JOLT_DEBUG=1 logs the gate decision per candidate (the decline reason, or engage), to tell whether an
+    // IQTREE_GPU_DEBUG=1 logs the gate decision per candidate (the decline reason, or engage), to tell whether an
     // ineligible family (e.g. +F) reaches this hook and is declined by a specific gate, vs never arriving
     // (staged-search dispatches it elsewhere). Env-gated => zero cost in production; no CPU-path behaviour change.
-    static const bool GPUJOINT_DBG = (getenv("JOLT_DEBUG") != nullptr);
+    static const bool GPUJOINT_DBG = (getenv("IQTREE_GPU_DEBUG") != nullptr);
     if (GPUJOINT_DBG) {
         string mn = model ? model->getName() : string("(nullmodel)");
         // freqtype: 1=USER_DEFINED 2=EQUAL 3=EMPIRICAL(+F) 4=ESTIMATE(+FO) (tools.h StateFreqType)
@@ -1956,10 +1956,10 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
     // (model_factory ptr + ASCType/ASC_NONE in scope via phylotree.h -> modelfactory.h + utils/tools.h).
     if (model_factory && model_factory->getASC() != ASC_NONE) GPUJOINT_DECLINE("ascertainment-bias");
     // Free substitution params (DNA HKY..GTR): the eigensystem moves, so joint-optimiser FD-optimises them via the decompose
-    // callback. On by default; JOLT_NO_FREEQ disables it (debug / A-B). Restricted to ns==4 reversible,
+    // callback. On by default; IQTREE_GPU_NO_FREEQ disables it (debug / A-B). Restricted to ns==4 reversible,
     // getNDim()<=5, fixed freqs (exclude +FO / FREQ_ESTIMATE, whose free freq dims are not yet handled). AA
     // fixed-Q (getNDim()==0) is unaffected.
-    static const bool JOLT_FREEQ_EN = (getenv("JOLT_NO_FREEQ") == nullptr);
+    static const bool gpujoint_freeq_enabled = (getenv("IQTREE_GPU_NO_FREEQ") == nullptr);
     int nFreeQ = 0;
     {
         int ndim = model->getNDim();
@@ -1969,7 +1969,7 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
         // still passes the write-back gate (which checks GPU/CPU coherence, not optimality). Require
         // nFreqParams==0 so the entire getVariables() tail is exchangeabilities. +FQ/+F (0 freq dims) still
         // engage; tied-freq is not in the default -m MF DNA set, so this declines such explicit user models to CPU.
-        bool freeQok = JOLT_FREEQ_EN && ndim > 0 && ndim <= 5 && ns == 4 &&
+        bool freeQok = gpujoint_freeq_enabled && ndim > 0 && ndim <= 5 && ns == 4 &&
                        model->getFreqType() != FREQ_ESTIMATE && model->isReversible() &&
                        nFreqParams(model->getFreqType()) == 0;
         if (ndim != 0 && !freeQok) GPUJOINT_DECLINE("free-subst-params");  // +FO / tied-freq / AA-GTR / free-Q -> CPU
@@ -1983,36 +1983,36 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
     // silently wrong since writeback precedes the self-check). joint-optimiser only implements the mean discrete-gamma
     // (Yang 1994) discretisation, so require exactly GAMMA_CUT_MEAN: this declines +R (isGammaRate()==0), +R+I,
     // and the median gamma variant +Gm/+I+Gm (isGammaRate()==GAMMA_CUT_MEDIAN).
-    // Pure +R (FreeRate, no +I) passes through to the launcher only under JOLT_RGRADCHECK, which runs the
+    // Pure +R (FreeRate, no +I) passes through to the launcher only under IQTREE_GPU_RGRADCHECK, which runs the
     // weight-gradient FD self-check then declines to CPU.
     // Engage the in-tree +R joint LM. Regime: +R with no +I (pinv<=0), Q either fixed (AA / JC,F81: nFreeQ==0) or
     // free (HKY..GTR+R: the diagonal-LM optimises the free-Q axis jointly with the rate/weight axes, which are
     // independent - no pinv coupling when optPinv==0, so applyPinv(0) is identity and the +R seeding/gauge are
     // unchanged). Both rates+weights free (getNDim()==2*ncat-2; a user-fixed +R{...} or a mid-EM substep -> CPU),
-    // ncat<=JOLT_FREERATE_MAXCAT, full model-param path only (brlenOnly/lean holds +R fixed).
-    static const int JOLT_FREERATE_MAXCAT = 4;
+    // ncat<=gpujoint_freerate_maxcat, full model-param path only (brlenOnly/lean holds +R fixed).
+    static const int gpujoint_freerate_maxcat = 4;
     // +I+R: RateFree must be fully free (rates+weights = 2K-2 dims); RateFreeInvar adds one free dim (pinv) when
     // present (getNDim == 2K-1), so strip it before the 2K-2 test. Fixed-pinv keeps getNDim==2K-2 -> freeRateOK
     // true, but the +I guard (isFixPInvar) then declines it; a user-fixed +R{...} -> rfDim<2K-2 -> CPU. The +I
     // (1-pinv) bridge through the kernel's meanR/bprop basis is byte-identical at pinv=0 (pure +R).
     int rfDim = site_rate->getNDim() - ((site_rate->getPInvar() > 0.0 && !site_rate->isFixPInvar()) ? 1 : 0);
     bool freeRateOK = (ncat > 1 && site_rate->isFreeRate()
-                       && rfDim == 2*ncat - 2 && ncat <= JOLT_FREERATE_MAXCAT && !brlenOnly);
-    bool rgcheck = (ncat > 1 && site_rate->isFreeRate() && site_rate->getPInvar() <= 0.0 && getenv("JOLT_RGRADCHECK") != nullptr);
+                       && rfDim == 2*ncat - 2 && ncat <= gpujoint_freerate_maxcat && !brlenOnly);
+    bool rgcheck = (ncat > 1 && site_rate->isFreeRate() && site_rate->getPInvar() <= 0.0 && getenv("IQTREE_GPU_RGRADCHECK") != nullptr);
     if (ncat > 1 && site_rate->isGammaRate() != GAMMA_CUT_MEAN && !freeRateOK && !rgcheck) GPUJOINT_DECLINE("non-mean-gamma");
     // +I (proportion of invariant sites) is jointly optimised by joint-optimiser, but only for +I+G (RateGammaInvar:
     // getProp(c)=(1-pinv)/K, standard mean-1 discrete-gamma rates). Pure +I (RateInvar, ncat==1) rescales
     // getRate=1/(1-pinv) -> out of joint-optimiser scope -> CPU. A user-fixed pinv, or no constant sites (pinvMax->0
     // degenerate), also fall to CPU. The invariant term L_p += pinv*base_invar[p] is added in the kernel; the
     // joint LM step moves pinv alongside the branches + alpha (the same machinery that absorbed alpha).
-    static const double JOLT_MIN_PINVAR = 1e-6;          // == MIN_PINVAR (model/rateinvar.h)
+    static const double gpujoint_min_pinvar = 1e-6;          // == MIN_PINVAR (model/rateinvar.h)
     double pinv0 = site_rate->getPInvar();
     int optPinv = 0;
     if (pinv0 > 0.0) {
         if (site_rate->isFixPInvar())                                GPUJOINT_DECLINE("fixed-pinvar");
         if (ncat <= 1)                                               GPUJOINT_DECLINE("pure-pinvar-no-gamma");  // RateInvar getRate=1/(1-pinv) -> CPU (ncat>1 already => mean-gamma per the check above)
         if (params && params->no_rescale_gamma_invar)                GPUJOINT_DECLINE("no-rescale-gamma-invar"); // GPU unconditionally rescales rates by 1/(1-pinv); this flag disables IQ-TREE's rescale -> mismatch -> CPU
-        if (aln->frac_const_sites <= 2.0*JOLT_MIN_PINVAR)            GPUJOINT_DECLINE("no-const-sites");
+        if (aln->frac_const_sites <= 2.0*gpujoint_min_pinvar)            GPUJOINT_DECLINE("no-const-sites");
         optPinv = 1;
     }
     if (brlenOnly) optPinv = 0;   // brlen-only reopt holds p_invar fixed
@@ -2042,8 +2042,8 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
     if (nFreeQ > 0) model->gpuGetFreeParams(q0vec.data());
     JoltQCtx qctx{ model, ns };
 
-    // --jolt-diag: time the once-per-call host rebuild (DFS reindex + O(ntax*nptn) tip[] recompaction + flat arrays)
-    double _jd_h1_t0 = params->jolt_diag ? getRealTime() : 0.0;
+    // --gpu-joint-diag: time the once-per-call host rebuild (DFS reindex + O(ntax*nptn) tip[] recompaction + flat arrays)
+    double _jd_h1_t0 = params->gpu_joint_diag ? getRealTime() : 0.0;
 
     // ---- topology rooted at internal node R (IQ-TREE roots at a leaf; lnL is reversible-invariant) ----
     if (!root || !root->isLeaf() || root->neighbors.empty()) return (double)NAN;
@@ -2110,7 +2110,7 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
         for (int k = 0; k < (int)childList[i].size() && k < 3; k++) nodeChild[i*3+k] = childList[i][k];
     }
 
-    double jd_h1 = params->jolt_diag ? getRealTime() - _jd_h1_t0 : 0.0;   // --jolt-diag: end host-rebuild timing
+    double jd_h1 = params->gpu_joint_diag ? getRealTime() - _jd_h1_t0 : 0.0;   // --gpu-joint-diag: end host-rebuild timing
 
     double alpha0 = (ncat > 1) ? site_rate->getGammaShape() : 1.0;
     int optAlpha = (!brlenOnly && ncat > 1 && !site_rate->isFixGammaShape()) ? 1 : 0;   // brlen-only holds alpha fixed
@@ -2119,18 +2119,18 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
     // ---- run the joint optimiser on the GPU ----
     vector<double> outBrlen(nNodes, 0.0); double outAlpha = alpha0; double outPinv = pinv0; int outIters = 0;
     vector<double> outRates(freeRateOK ? ncat : 0), outProps(freeRateOK ? ncat : 0);   // +R optimised rates/weights (writeback below)
-    double _jd_dev_t0 = params->jolt_diag ? getRealTime() : 0.0;   // --jolt-diag: device-call wall start
+    double _jd_dev_t0 = params->gpu_joint_diag ? getRealTime() : 0.0;   // --gpu-joint-diag: device-call wall start
     double joltLnL = gpu_joint_optimize(ns, nptn, ncat, ntax, nNodes, /*root=*/nid[R],
         Uinv, UinvRowSum.data(), U, eval, catProp.data(), tip.data(), ptnFreq.data(),
         nodeNch.data(), nodeChild.data(), nodeLeaf.data(), nodeParentLen.data(),
         alpha0, optAlpha, /*maxiter=*/brlenMaxIter,
-        base_invar.data(), pinv0, optPinv, JOLT_MIN_PINVAR, pinvMax,
+        base_invar.data(), pinv0, optPinv, gpujoint_min_pinvar, pinvMax,
         catRate0.data(), (freeRateOK ? 1 : (rgcheck ? 2 : 0)),   // 1=engage the +R joint LM; 2=RGRADCHECK-only then decline to CPU
-        nFreeQ, (nFreeQ > 0 ? q0vec.data() : nullptr), jolt_qdecompose_intree, &qctx,   // DNA free-Q
+        nFreeQ, (nFreeQ > 0 ? q0vec.data() : nullptr), gpu_qdecompose_intree, &qctx,   // DNA free-Q
         (nFreeQ > 0 ? outQ.data() : nullptr),
         outBrlen.data(), &outAlpha, &outPinv, &outIters,
         (freeRateOK ? outRates.data() : nullptr), (freeRateOK ? outProps.data() : nullptr));   // optimised +R rates/weights
-    if (params->jolt_diag) {   // --jolt-diag: per-call host-rebuild vs device wall; echild reported by the CUDA TU
+    if (params->gpu_joint_diag) {   // --gpu-joint-diag: per-call host-rebuild vs device wall; echild reported by the CUDA TU
         double jd_dev = getRealTime() - _jd_dev_t0;
         printf("GPU-JOINT-DIAG-HOST H1=%.6f device=%.6f iters=%d ntax=%d nptn=%d\n", jd_h1, jd_dev, outIters, ntax, nptn);
     }
@@ -2155,12 +2155,12 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
         // NNI round), trust the device-returned lnL for curScore, and skip the full CPU computeLikelihood()
         // self-check (the ModelFinder-only gain-eraser). NaN was already handled above -> CPU fallback.
         clearAllPartialLH();
-        // Coherence audit (JOLT_AUDIT=1; off by default => the lean path is byte-identical). joint-optimiser lnL fidelity
+        // Coherence audit (IQTREE_GPU_AUDIT=1; off by default => the lean path is byte-identical). joint-optimiser lnL fidelity
         // (rel<=1e-6) was validated on fitted ModelFinder trees, not on the intermediate far-from-optimum trees
         // this NNI loop feeds joint-optimiser; the lean tail dropped the full-tail rel<=1e-6 catch (see below) for a
         // finite-but-wrong device lnL. When set, recompute the CPU lnL at the written-back lengths and log rel
         // without gating (still return joltLnL), so one search measures max(rel) over all intermediate-tree calls.
-        if (getenv("JOLT_AUDIT")) {
+        if (getenv("IQTREE_GPU_AUDIT")) {
             double cpuLnL = computeLikelihood();   // fresh CPU postorder at the joint-optimiser-written lengths (partials just cleared)
             double arel = (cpuLnL != 0.0) ? fabs((joltLnL - cpuLnL) / cpuLnL) : fabs(joltLnL - cpuLnL);
             double aabs = fabs(joltLnL - cpuLnL);
@@ -2198,11 +2198,11 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
     // Use model->getName() (includes the +F/+FO freq suffix) not model->name (matrix only), else the print drops
     // +F and mislabels LG+F+G4 as "LG+G4", making +F joint-optimiser-coverage uncountable.
     string joltModelName = model->getName() + (ncat > 1 ? ((freeRateOK ? "+R" : "+G") + std::to_string(ncat)) : string(""));
-    // The per-model GPU-vs-CPU validation line is diagnostic (fires once per candidate). Gate behind JOLT_DEBUG
-    // so a production --jolt/--ctf run shows only the standard ModelFinder output + the joint-optimiser banner. The CPU
+    // The per-model GPU-vs-CPU validation line is diagnostic (fires once per candidate). Gate behind IQTREE_GPU_DEBUG
+    // so a production --gpu-joint/--ctf run shows only the standard ModelFinder output + the joint-optimiser banner. The CPU
     // recompute + safety gate below are NOT gated - they are the load-bearing write-back coherence check that
     // falls back to CPU on a bad result.
-    if (getenv("JOLT_DEBUG") && report_count < 1000) { report_count++;
+    if (getenv("IQTREE_GPU_DEBUG") && report_count < 1000) { report_count++;
         printf("[GPU-JOINT] model=%s ns=%d ncat=%d: %d joint iters | GPU lnL=%.6f  CPU lnL=%.6f  rel=%.3e %s | alpha %.6f->%.6f | pinv %.6f->%.6f%s\n",
                joltModelName.c_str(), ns, ncat, outIters,
                joltLnL, cpuLnL, rel, (rel <= 1e-9 ? "PASS" : (rel <= 1e-6 ? "OK(gamma-resid)" : "MISMATCH")),
@@ -2235,9 +2235,9 @@ double PhyloTree::optimizeAllBranchesGpuJoint(int maxiter) {
     // Per-round LM cap. Default is 2 (see phylotree.h). A higher cap over-converges each intermediate topology
     // (which changes next round; the final tree is CPU-reconverged, not by joint-optimiser), so the cap can shift the final
     // lnL by O(1e-3) at fixed topology (RF==0). maxiter=2 holds the tight gate (RF==0 + dlnL<=1e-3).
-    // JOLT_BRLEN_MAXITER env: >0 caps the LM iters; <0 skips the GPU reopt entirely (CPU fallback).
-    static const int env = []{ const char* e = getenv("JOLT_BRLEN_MAXITER"); return e ? atoi(e) : 0; }();
-    if (env < 0) return (double)NAN;   // JOLT_BRLEN_MAXITER<0 => skip the GPU reopt entirely => CPU
+    // IQTREE_GPU_BRLEN_MAXITER env: >0 caps the LM iters; <0 skips the GPU reopt entirely (CPU fallback).
+    static const int env = []{ const char* e = getenv("IQTREE_GPU_BRLEN_MAXITER"); return e ? atoi(e) : 0; }();
+    if (env < 0) return (double)NAN;   // IQTREE_GPU_BRLEN_MAXITER<0 => skip the GPU reopt entirely => CPU
                                        // optimizeAllBranches(1) fallback => the GPU timeline is pure screener (no
                                        // kj_pre/k1_node from gpu_joint_optimize colliding with the screener kernels).
                                        // unset => env=0 => this branch never taken => byte-identical production.
@@ -2247,7 +2247,7 @@ double PhyloTree::optimizeAllBranchesGpuJoint(int maxiter) {
 
 // ============================================================================================================
 // GPU joint optimiser for non-fused profile-mixture models (C20/C30/C60/MEOW...). The mixture analogue of
-// optimizeParametersGpuJoint: dispatched from ModelFactory::optimizeParameters under --jolt when getNMixtures()>1.
+// optimizeParametersGpuJoint: dispatched from ModelFactory::optimizeParameters under --gpu-joint when getNMixtures()>1.
 // Optimises branches + the gamma shape alpha on the GPU (diagonal-LM joint step over the regime axis
 // r=m*ncat+c), holding the class weights fixed (or, when eligible, optimising weights via an EM block), then
 // writes back + self-checks vs a fresh CPU computeLikelihood (rel<=1e-6 gate -> NaN / CPU fallback).
@@ -2261,7 +2261,7 @@ double PhyloTree::optimizeAllBranchesGpuJoint(int maxiter) {
 // single-model gate (optimizeParametersGpuJoint: if (ndim!=0 && !freeQok) decline). +I and free weights -> CPU.
 // ============================================================================================================
 double PhyloTree::optimizeParametersGpuJointMix(int fixed_len) {
-    static const bool GPUJOINT_DBG = (getenv("JOLT_DEBUG") != nullptr);
+    static const bool GPUJOINT_DBG = (getenv("IQTREE_GPU_DEBUG") != nullptr);
     #define JMIX_DECLINE(why) do { if (GPUJOINT_DBG) { fprintf(stderr, "[GPU-JOINT-MIX-GATE] decline reason=%s\n", why); fflush(stderr); } return (double)NAN; } while (0)
     if (!model || !site_rate || !aln) JMIX_DECLINE("null-ptr");
     if (fixed_len != BRLEN_OPTIMIZE) JMIX_DECLINE("brlen-mode");
@@ -2340,7 +2340,7 @@ double PhyloTree::optimizeParametersGpuJointMix(int fixed_len) {
     std::vector<double> b = bLive; double alpha = (ncat > 1 ? alpha0 : 1.0);
     double finalLnL = (double)NAN; int outIters = 0;
     {
-        std::lock_guard<std::mutex> lk(gpu_mixjolt_mtx);
+        std::lock_guard<std::mutex> lk(gpu_mixjoint_mtx);
         double mu = 1.0; int stall = 0;
         double lnL = gpuComputeTreeLnLCleanRoomMix(nullptr, nullptr, wp, b.data(), alphaArg(alpha), pinvArg(pinv));
         if (!std::isnan(lnL)) {
@@ -2475,8 +2475,8 @@ double PhyloTree::optimizeParametersGpuJointMix(int fixed_len) {
     double rel = (cpuLnL != 0.0) ? std::fabs((finalLnL - cpuLnL) / cpuLnL) : std::fabs(finalLnL - cpuLnL);
     static int report_count = 0;
     string joltModelName = model->getName() + (optPinv || pinv0 > 0.0 ? string("+I") : string("")) + (ncat > 1 ? ("+G" + std::to_string(ncat)) : string(""));
-    // diagnostic - gate behind JOLT_DEBUG (the CPU recompute + safety gate below stay)
-    if (getenv("JOLT_DEBUG") && report_count < 1000) { report_count++;
+    // diagnostic - gate behind IQTREE_GPU_DEBUG (the CPU recompute + safety gate below stay)
+    if (getenv("IQTREE_GPU_DEBUG") && report_count < 1000) { report_count++;
         printf("[GPU-JOINT-MIX] model=%s N=%d ns=%d ncat=%d weights=%s: %d iters | GPU lnL=%.6f  CPU lnL=%.6f  rel=%.3e %s | alpha %.6f->%.6f | pinv %.6f->%.6f%s\n",
                joltModelName.c_str(), N, ns, ncat, (optWeights ? "EM" : "fixed"), outIters, finalLnL, cpuLnL, rel,
                (rel <= 1e-6 ? "OK" : "MISMATCH"), alpha0, (ncat > 1 ? site_rate->getGammaShape() : 0.0),

@@ -1370,14 +1370,14 @@ double ModelFactory::optimizeParametersGammaInvar(int fixed_len, bool write_info
         return optimizeParameters(fixed_len, write_info, logl_epsilon, gradient_epsilon);
     // Number of +I+G restart points. The multi-start loop below escapes the pinv-alpha ridge: it seeds the
     // optimiser from initPInv = MIN_PINVAR .. frac_const in (n_pinv_starts-1) equal steps and keeps the best.
-    // CPU default is 10. Under --jolt, joint-optimiser joint-optimises branches, alpha and pinv reliably for small pinv
+    // CPU default is 10. Under --gpu-joint, joint-optimiser joint-optimises branches, alpha and pinv reliably for small pinv
     // moves but stalls on large pinv travel, so a single start is unsafe; 4 spanning starts suffice (one always
     // lands near the optimum and joint-optimiser polishes it locally) and give the same MLE as 10 starts.
     int n_pinv_starts = 10;
 #ifdef IQTREE_GPU
     {
         PhyloTree *jt = site_rate->getTree();
-        if (jt && jt->params && jt->params->jolt
+        if (jt && jt->params && jt->params->gpu_joint
             && jt->aln && (jt->aln->num_states == 4 || jt->aln->num_states == 20)
             && model->isReversible() && model->getNMixtures() == 1 && !model->isSiteSpecificModel()
             && model->getNDim() == 0
@@ -1416,7 +1416,7 @@ double ModelFactory::optimizeParametersGammaInvar(int fixed_len, bool write_info
     double bestAlpha = 0.0;
     double bestPInvar = 0.0;
 
-    double testInterval = (frac_const - MIN_PINVAR * 2) / (double)(n_pinv_starts - 1);  // n_pinv_starts points (CPU 10; --jolt 4)
+    double testInterval = (frac_const - MIN_PINVAR * 2) / (double)(n_pinv_starts - 1);  // n_pinv_starts points (CPU 10; --gpu-joint 4)
     double initPInv = MIN_PINVAR;
     double initAlpha = site_rate->getGammaShape();
 
@@ -1592,24 +1592,24 @@ double ModelFactory::optimizeParameters(int fixed_len, bool write_info,
     // joint LM step over (all branches + alpha) on the GPU. optimizeParametersGpuJoint() writes the result back
     // through the cache-invalidating setters and self-checks against a fresh CPU computeLikelihood; it returns
     // NaN for ineligible regimes or CUDA errors, in which case we fall through to the standard CPU path below.
-    if (tree->params && tree->params->jolt) {
+    if (tree->params && tree->params->gpu_joint) {
         ModelSubst *jm = tree->getModel();
         if (jm && jm->getNMixtures() > 1) {
             // The host-driven profile-mixture optimiser (optimizeParametersGpuJointMix) is correct but
             // launch-latency-bound: it converges monotonically to the fixed-weight optimum, but slowly
             // (per-tree-node kernel launches plus a host echild rebuild and re-upload every sweep). It serves as
             // a reference and is off by default until the device-resident mixture optimiser lands. Opt in with
-            // JOLT_MIX_HOSTDRIVEN=1; without the flag, mixtures fall through to the fast CPU path below.
-            if (getenv("JOLT_MIX_HOSTDRIVEN")) {
-                double jolt_lh = tree->optimizeParametersGpuJointMix(fixed_len);
-                if (!std::isnan(jolt_lh))
-                    return jolt_lh;
+            // IQTREE_GPU_MIX_HOSTDRIVEN=1; without the flag, mixtures fall through to the fast CPU path below.
+            if (getenv("IQTREE_GPU_MIX_HOSTDRIVEN")) {
+                double joint_lh = tree->optimizeParametersGpuJointMix(fixed_len);
+                if (!std::isnan(joint_lh))
+                    return joint_lh;
             }
             // else: fall through to CPU
         } else {
-            double jolt_lh = tree->optimizeParametersGpuJoint(fixed_len);
-            if (!std::isnan(jolt_lh))
-                return jolt_lh;
+            double joint_lh = tree->optimizeParametersGpuJoint(fixed_len);
+            if (!std::isnan(joint_lh))
+                return joint_lh;
         }
     }
 #endif

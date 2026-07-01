@@ -2137,12 +2137,12 @@ public:
         rounds the registered lnL is the joint-optimiser-capped value, so a lower cap can shift the FINAL lnL by O(1e-3) at FIXED
         topology -- DNA-200tx mi2 dlnL=-0.0008 (RF==0). Scientifically negligible (~7e-11 rel, << any BIC threshold),
         but real. (2) UNTESTED: trajectory-divergence (no escape dataset escaped in validation) + multi-seed (all
-        seed 1). Owed before this graduates beyond the --ts-fused research path. JOLT_BRLEN_MAXITER env overrides
+        seed 1). Owed before this graduates beyond the --ts-fused research path. IQTREE_GPU_BRLEN_MAXITER env overrides
         (>0 caps, <0 skips->CPU; default-2 is byte-identical to env=2). */
     double optimizeAllBranchesGpuJoint(int maxiter = 2);
 
     /** GPU joint optimiser for NON-FUSED PROFILE-MIXTURE models (C20/C30/C60/MEOW...). The mixture
-        analogue of optimizeParametersGpuJoint, dispatched from ModelFactory::optimizeParameters under --jolt when
+        analogue of optimizeParametersGpuJoint, dispatched from ModelFactory::optimizeParameters under --gpu-joint when
         getNMixtures()>1. Optimises (all branches + gamma alpha) on the GPU over the regime axis r=m*ncat+c, holding
         the class WEIGHTS FIXED (eligibility gate model->getNDim()==0 => fix_prop && no free per-class freq/Q params),
         then writes back + self-checks vs a fresh CPU computeLikelihood (rel<=1e-6 -> NaN/CPU fallback). Returns the

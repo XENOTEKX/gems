@@ -1327,9 +1327,9 @@ void getRateHet(SeqType seq_type, string model_name, double frac_invariant_sites
 // ============================================================================
 
 /**
- The CTF JOLT eligibility gate, mirroring ctf_rerank.py ineligible():
+ The CTF joint optimiser eligibility gate, mirroring ctf_rerank.py ineligible():
  FreeRate (+R / +I+R) and pure-+I decline to CPU; everything else (incl. +I+G,
- free-Q DNA) engages JOLT. MUST stay in lockstep with the in-tree JOLT
+ free-Q DNA) engages joint optimiser. MUST stay in lockstep with the in-tree joint optimiser
  eligibility gate (phylotreegpu.cpp).
  */
 static inline bool ctfIneligible(const string &name) {
@@ -1388,14 +1388,14 @@ static vector<pair<string,bool> > selectCTFTopK(CandidateModelSet &ordered, int 
         // verbose=false suppresses ALL detector output (used by ctfSelfTest so the
         // fixtures never leak [CTF detector] lines into a production --ctf run; note
         // NDEBUG is not defined in IQ-TREE's Release build, so the self-test runs).
-        if (verbose && getenv("JOLT_DEBUG"))
+        if (verbose && getenv("IQTREE_GPU_DEBUG"))
             cout << "  [CTF detector] best_elig=" << ordered[be].getName()
                  << "(" << ordered[be].BIC_score << ") best_inel=" << ordered[bi].getName()
                  << "(" << ordered[bi].BIC_score << ") inel_lead=" << lead
                  << " margin=" << margin << " RATE_HET_FLAG=" << (flag ? "true" : "false") << endl;
         if (verbose && flag)
             cout << "  [CTF detector] *** WARNING: a +R/+I model genuinely leads on the subsample — "
-                    "eligible-refine may MISS the true winner; needs +R JOLT or CPU full-refine ***" << endl;
+                    "eligible-refine may MISS the true winner; needs +R joint optimiser or CPU full-refine ***" << endl;
     }
 
     // ----- per top-K refine/skip action -----
@@ -1537,7 +1537,7 @@ bool runCTFModelFinder(Params &params, IQTree &iqtree, ModelCheckpoint &model_in
          << nsite << " sites" << endl;
 
     // ========================================================================
-    // STEP 2 — Coarse pass on the subsample (GPU JOLT). Its OWN in-memory
+    // STEP 2 — Coarse pass on the subsample (GPU joint optimiser). Its OWN in-memory
     // checkpoint (empty filename => never writes/clobbers the run's .model.gz).
     // evaluateAll() has its OWN across-model OpenMP — we do NOT add our own.
     // ========================================================================
@@ -1688,7 +1688,7 @@ bool runCTFModelFinder(Params &params, IQTree &iqtree, ModelCheckpoint &model_in
     // EXACTLY (that path is validated above). The main iqtree carries stale
     // params/kernel/thread state from the main pipeline:
     //  - missing setLikelihoodKernel/optimize_by_newton -> optimizeModelParameters
-    //    (JOLT) dereferences a stale likelihood kernel -> SIGSEGV;
+    //    (joint optimiser) dereferences a stale likelihood kernel -> SIGSEGV;
     //  - missing setNumThreads (num_threads<=0, since the main pipeline resolves
     //    threads only AFTER ModelFinder) -> ensureNumberOfThreadsIsSet fires the
     //    topology-mutating testNumThreads on the half-built winner tree -> SIGSEGV.

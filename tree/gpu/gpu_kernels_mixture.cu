@@ -220,20 +220,20 @@ static DevBuf gb_mDval0, gb_mDval1, gb_mDval2;   // central-edge derivative coef
 // Pick the pattern-tiling factor for a mixture launcher. perPatternDoubles = the
 // O(nptn) device footprint per pattern, in doubles (e.g. nInternal*R*ns for the
 // lnL partial arena; +nPool*R*ns for the derivative preorder pool). nTile =
-// ceil(one-shot O(nptn) bytes / 80% free VRAM); JOLT_NTILE overrides. The result
+// ceil(one-shot O(nptn) bytes / 80% free VRAM); IQTREE_GPU_NTILE overrides. The result
 // is chunk-count-independent (per-pattern values are chunk-independent; the Kahan
 // reductions add patterns in order 0..nptn-1), so nTile only trades VRAM for
 // kernel launches, never the answer.
 int mix_pick_ntile(int nptn, size_t perPatternDoubles) {
-    if (const char* e = getenv("JOLT_NTILE")) { int t=atoi(e); if(t<1)t=1;
-        if(getenv("JOLT_DEBUG")) fprintf(stderr,"[MIX-TILE] JOLT_NTILE=%d (nptn=%d)\n",t,nptn); return t; }
+    if (const char* e = getenv("IQTREE_GPU_NTILE")) { int t=atoi(e); if(t<1)t=1;
+        if(getenv("IQTREE_GPU_DEBUG")) fprintf(stderr,"[MIX-TILE] IQTREE_GPU_NTILE=%d (nptn=%d)\n",t,nptn); return t; }
     size_t foot = perPatternDoubles * (size_t)nptn * sizeof(double);
     size_t freeB=0, totB=0; int nTile=1;
     if (cudaMemGetInfo(&freeB,&totB)==cudaSuccess && freeB>0) {
         double budget = 0.80*(double)freeB;
         int T = (int)ceil((double)foot/budget); if(T<1)T=1; nTile=T;
     }
-    if (getenv("JOLT_DEBUG")) fprintf(stderr,"[MIX-TILE] nptn=%d perPtnDoubles=%zu O(nptn)foot=%.2fGB freeVRAM=%.1fGB -> nTile=%d (chunk~%d)\n",
+    if (getenv("IQTREE_GPU_DEBUG")) fprintf(stderr,"[MIX-TILE] nptn=%d perPtnDoubles=%zu O(nptn)foot=%.2fGB freeVRAM=%.1fGB -> nTile=%d (chunk~%d)\n",
         nptn,perPatternDoubles,(double)foot/1.073741824e9,(double)freeB/1.073741824e9,nTile,(nptn+nTile-1)/nTile);
     return nTile;
 }
@@ -269,7 +269,7 @@ extern "C" double gpu_lnl_crosscheck_mix(
     // axis (built once). The per-pattern patlh[p] is chunk-independent and the
     // Kahan lnL accumulator adds patterns in order 0..nptn-1 across chunks, so the
     // result is bit-identical to one-shot for any nTile. Auto-pick from free VRAM
-    // (80% target) or JOLT_NTILE override.
+    // (80% target) or IQTREE_GPU_NTILE override.
     int nTile = mix_pick_ntile(nptn, (size_t)(nInternal>0?nInternal:1)*(size_t)R*ns + (size_t)(out_lhcat?nmix:0) + 2);
     int chunk0 = (nptn + nTile - 1) / nTile;
     size_t slotSzMax = (size_t)R*ns*chunk0;
@@ -462,7 +462,7 @@ extern "C" double gpu_allbranch_derv_crosscheck_mix(
     dfs(root); int nInternal=(int)postorder.size();
     int treeH=0; std::function<void(int,int)> ddfs=[&](int u,int d){ if(d>treeH)treeH=d; for(int c:child[u]) ddfs(c,d+1); }; ddfs(root,0);
     int nPool=treeH+2;   // O(depth): preorder holds one upper-partial slot per ancestor on the current path (peak == treeH)
-    if(getenv("ALLDERV_DBG")) fprintf(stderr,"[ALLDERV-DBG] entry ns=%d nptn=%d ncat=%d nmix=%d nnodes=%d root=%d nInternal=%d treeH=%d nPool=%d R=%d\n",ns,nptn,ncat,nmix,nnodes,root,nInternal,treeH,nPool,R);
+    if(getenv("IQTREE_GPU_DEBUG")) fprintf(stderr,"[ALLDERV-DBG] entry ns=%d nptn=%d ncat=%d nmix=%d nnodes=%d root=%d nInternal=%d treeH=%d nPool=%d R=%d\n",ns,nptn,ncat,nmix,nnodes,root,nInternal,treeH,nPool,R);
 
     size_t ecStride=(size_t)R*ns*ns, exStride=(size_t)R*ns;   // slotSz is chunk-scoped (pattern tiling)
 
@@ -604,7 +604,7 @@ extern "C" double gpu_allbranch_derv_crosscheck_mix(
         if(poolUnderflow) return (double)NAN;
         GCK(cudaDeviceSynchronize()); GCK(cudaGetLastError());
     }
-    if(getenv("ALLDERV_DBG")) fprintf(stderr,"[ALLDERV-DBG] tiled proc done (nTile=%d underflow=%d maxHeld=%d treeH=%d nInternal=%d)\n",nTile,(int)poolUnderflow,maxHeld,treeH,nInternal);
+    if(getenv("IQTREE_GPU_DEBUG")) fprintf(stderr,"[ALLDERV-DBG] tiled proc done (nTile=%d underflow=%d maxHeld=%d treeH=%d nInternal=%d)\n",nTile,(int)poolUnderflow,maxHeld,treeH,nInternal);
     for(int v=0;v<nnodes;v++){ out_df[v]=accDf[v]; out_ddf[v]=accDdf[v]; }
     return 0.0;
 }

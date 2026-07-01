@@ -3637,19 +3637,19 @@ void runTreeReconstruction(Params &params, IQTree* &iqtree) {
 
         uint64_t mem_required = iqtree->getMemoryRequired();
 
-        // --jolt: the GPU computes the likelihood, so IQ-TREE's host per-node partial-lh arena is needed
+        // --gpu-joint: the GPU computes the likelihood, so IQ-TREE's host per-node partial-lh arena is needed
         // only for the post-write-back coherence self-check (computeLikelihood, recompute-EXACT under
         // mem-save). If the LM_PER_NODE arena would not comfortably fit the allocation, run the host in the
         // lean LM_MEM_SAVE min-slots tier (max_lh_slots = log2(leafNum)+1) -> exact lnL, fits at any scale.
         // We use the lean tier (max_mem_size=0), not the fractional one, because getMemoryRequired() omits
         // G_matrix/theta_all/buffers (~22 GB at 10M) so the fractional slot count would still cgroup-kill.
-        if (params.jolt && !iqtree->isSuperTree() && params.lh_mem_save != LM_MEM_SAVE
+        if (params.gpu_joint && !iqtree->isSuperTree() && params.lh_mem_save != LM_MEM_SAVE
             && mem_required >= total_mem * 0.7) {
             uint64_t per_node = mem_required;
             params.lh_mem_save = LM_MEM_SAVE;
             params.max_mem_size = 0.0;
             mem_required = iqtree->getMemoryRequired();
-            cout << "NOTE: [--jolt] host LM_PER_NODE arena " << (per_node / 1073741824.0)
+            cout << "NOTE: [--gpu-joint] host LM_PER_NODE arena " << (per_node / 1073741824.0)
                  << " GB exceeds 70% of the " << (total_mem / 1073741824.0)
                  << " GB allocation -> host runs memory-saving (" << (mem_required / 1073741824.0)
                  << " GB; the GPU does the likelihood, the host self-check recomputes exactly)" << endl;

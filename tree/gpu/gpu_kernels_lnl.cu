@@ -100,7 +100,7 @@ __global__ void k_leaf_eig(int ns, int nptn, int ncat, const unsigned char* __re
     }
 }
 
-// =============================== JOLT kernels ===============================
+// =============================== joint-optimiser preorder kernel ===============================
 // kj_pre — top-down preorder eigen-space partial pre_v ("rest of tree" above edge
 // u->v), without v's own branch (the gradient's g_val0/1(b_v) reapply it once).
 // The parent branch b_u (expfac_u) is applied here.

@@ -19,12 +19,12 @@
 #include <functional>
 #include <algorithm>
 #include <chrono>
-// Phase-B timing breakdown (env JOLT_PARS_TIMING; OFF by default => byte-identical). Picks the v2 lever:
+// Phase-B timing breakdown (env IQTREE_GPU_PARS_TIMING; OFF by default => byte-identical). Picks the v2 lever:
 // produce-schedule (host) vs gpu-call (H2D+launches+sync+kernel, mutex-serialized so sum~=wall) vs CPU fallback steps.
 static std::atomic<long long> g_pb_ns_produce{0}, g_pb_ns_gpucall{0};
 static std::atomic<long long> g_pb_steps_engaged{0}, g_pb_steps_fallback{0};
 struct PbTimingDump { ~PbTimingDump() {
-    if (getenv("JOLT_PARS_TIMING"))
+    if (getenv("IQTREE_GPU_PARS_TIMING"))
         fprintf(stderr, "[GPUPARS-TIMING] engaged_steps=%lld fallback_steps=%lld produce_sum=%.3fs gpucall_sum=%.3fs\n",
                 (long long)g_pb_steps_engaged, (long long)g_pb_steps_fallback,
                 g_pb_ns_produce/1e9, g_pb_ns_gpucall/1e9);

@@ -2283,12 +2283,12 @@ int main(int argc, char *argv[]) {
     parseArg(argc, argv, Params::getInstance());
 
 #ifdef IQTREE_GPU
-    // Production GPU build: the GPU JOLT path is the DEFAULT. A plain invocation (no GPU flag)
-    // runs JOLT; opt out with --no-jolt / --cpu (sets no_gpu, clearing gpu/jolt/ctf during parse).
+    // Production GPU build: the GPU joint-optimiser path is the DEFAULT. A plain invocation (no GPU flag)
+    // runs joint optimiser; opt out with --no-gpu-joint / --cpu (sets no_gpu, clearing gpu/gpu_joint/ctf during parse).
     // An explicit --gpu (alone) is respected as-is. Ineligible models still fall back to CPU.
     if (!Params::getInstance().no_gpu && !Params::getInstance().gpu) {
         Params::getInstance().gpu = true;
-        Params::getInstance().jolt = true;
+        Params::getInstance().gpu_joint = true;
     }
 #endif
 
@@ -2296,17 +2296,17 @@ int main(int argc, char *argv[]) {
     // The verbose build-scaffold self-test (hello-world kernel + device dump) now runs ONLY
     // when IQTREE_GPU_DIAG is set in the environment, so production runs stay clean (the GPU
     // device line is printed in the startup banner instead). A CPU-only build still warns if
-    // --gpu/--jolt is passed explicitly.
+    // --gpu/--gpu-joint is passed explicitly.
     if (Params::getInstance().gpu) {
 #ifdef IQTREE_GPU
         if (getenv("IQTREE_GPU_DIAG"))
             iqtree_gpu_diag();
 #else
         cout << "NOTE: this binary was built WITHOUT GPU support (reconfigure with "
-                "-DIQTREE_GPU=ON); --gpu/--jolt/--ctf are disabled, using the standard CPU path." << endl;
+                "-DIQTREE_GPU=ON); --gpu/--gpu-joint/--ctf are disabled, using the standard CPU path." << endl;
         // Clear the GPU flags so the banner reports the real (SIMD) kernel and --ctf
-        // falls through to standard ModelFinder instead of claiming "JOLT + CTF".
-        Params::getInstance().gpu = Params::getInstance().jolt = Params::getInstance().ctf = false;
+        // falls through to standard ModelFinder instead of claiming "GPU-Joint + CTF".
+        Params::getInstance().gpu = Params::getInstance().gpu_joint = Params::getInstance().ctf = false;
 #endif
     }
     // -------------------------------------------------------------------------
@@ -2468,9 +2468,9 @@ int main(int argc, char *argv[]) {
     }
 
     if (Params::getInstance().ctf) {
-        cout << "JOLT + CTF";
-    } else if (Params::getInstance().jolt) {
-        cout << "JOLT";
+        cout << "GPU-Joint + CTF";
+    } else if (Params::getInstance().gpu_joint) {
+        cout << "GPU-Joint";
     } else if (Params::getInstance().pll) {
 #ifdef __AVX__
         cout << "PLL-AVX";
@@ -3640,9 +3640,9 @@ char* build_phylogenetic(StringArray& cnames, StringArray& cseqs, const char* cm
     }
 
     if (Params::getInstance().ctf) {
-        cout << "JOLT + CTF";
-    } else if (Params::getInstance().jolt) {
-        cout << "JOLT";
+        cout << "GPU-Joint + CTF";
+    } else if (Params::getInstance().gpu_joint) {
+        cout << "GPU-Joint";
     } else if (Params::getInstance().pll) {
 #ifdef __AVX__
         cout << "PLL-AVX";

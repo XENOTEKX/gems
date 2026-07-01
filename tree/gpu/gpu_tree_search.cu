@@ -465,7 +465,7 @@ extern "C" double gpu_screen_nni_batch_crosscheck(
 // chunk's patterns. Each move's lnL is a continuous per-move Kahan sum carried
 // across chunks (add order 0..nptn-1), so the result is bit-identical to nTile=1
 // for any nTile. nTile = forced_ntile>0 ? forced_ntile : mix_pick_ntile(...);
-// JOLT_NTILE env overrides the auto path; out_ntile reports the chosen nTile.
+// IQTREE_GPU_NTILE env overrides the auto path; out_ntile reports the chosen nTile.
 // echild/expfac/eigen carry no pattern axis (uploaded once); the move descriptors
 // are pattern-independent (enumerated once, reused every chunk). No extra kernel.
 
@@ -504,7 +504,7 @@ extern "C" double gpu_screen_nni_tile_crosscheck(
     if (nTile<1) nTile=1; if (nTile>nptn) nTile=nptn;
     int chunk0 = (nptn + nTile - 1) / nTile;
     size_t ecStride=(size_t)ncat*ns*ns, exStride=(size_t)ncat*ns, slotSzMax=(size_t)ncat*ns*chunk0;
-    if (getenv("JOLT_DEBUG")) fprintf(stderr,"[TILE] nptn=%d nTile=%d chunk0=%d perPtnDoubles=%zu upperGB(nt=1)=%.2f\n",
+    if (getenv("IQTREE_GPU_DEBUG")) fprintf(stderr,"[TILE] nptn=%d nTile=%d chunk0=%d perPtnDoubles=%zu upperGB(nt=1)=%.2f\n",
         nptn,nTile,chunk0,perPtnDoubles,(double)nnodes*ncat*ns*nptn*8/1.073741824e9);
 
     // ---- alloc ONCE at chunk0 max width (echild/expfac have NO pattern axis -> full nnodes-size, uploaded once) ----

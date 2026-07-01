@@ -329,15 +329,15 @@ public:
 	virtual void decomposeRateMatrix() {}
 
 	/**
-		GPU free-Q JOLT: pack the free model parameters (exchangeabilities + estimated freqs)
+		GPU free-Q joint optimiser: pack the free model parameters (exchangeabilities + estimated freqs)
 		into a flat 0-indexed vector of length getNDim(). Thin public wrapper over the protected
 		(set/get)Variables so the GPU optimiser can read/write the model's free parameters WITHOUT
 		replicating the per-model param_spec rate-class mapping (the wrapper applies it). No-op base;
-		ModelMarkov overrides. Called ONLY under --gpu/--jolt -> the CPU path never invokes these.
+		ModelMarkov overrides. Called ONLY under --gpu/--gpu-joint -> the CPU path never invokes these.
 	*/
 	virtual void gpuGetFreeParams(double *out) {}
 	/**
-		GPU free-Q JOLT: write the free model parameters from a flat 0-indexed vector of length
+		GPU free-Q joint optimiser: write the free model parameters from a flat 0-indexed vector of length
 		getNDim() (applies the param_spec rate-class mapping + the gauge), then re-decompose the rate
 		matrix. No-op base; ModelMarkov overrides.
 	*/

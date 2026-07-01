@@ -5543,14 +5543,15 @@ void parseArg(int argc, char *argv[], Params &params) {
                 params.gpu = true;
                 continue;
             }
-            if (strcmp(argv[cnt], "--jolt") == 0 || strcmp(argv[cnt], "-jolt") == 0) {
-                params.jolt = true;   // GPU JOLT joint-gradient optimiser (implies --gpu)
+            if (strcmp(argv[cnt], "--gpu-joint") == 0
+                || strcmp(argv[cnt], "--jolt") == 0 || strcmp(argv[cnt], "-jolt") == 0) {   // --jolt: deprecated alias
+                params.gpu_joint = true;   // GPU joint-gradient optimiser (implies --gpu)
                 params.gpu = true;
                 continue;
             }
             if (strcmp(argv[cnt], "--ctf") == 0 || strcmp(argv[cnt], "-ctf") == 0) {
-                params.ctf = true;    // native coarse-to-fine ModelFinder (implies --jolt --gpu)
-                params.jolt = true;
+                params.ctf = true;    // native coarse-to-fine ModelFinder (implies --gpu-joint --gpu)
+                params.gpu_joint = true;
                 params.gpu = true;
                 continue;
             }
@@ -5579,12 +5580,12 @@ void parseArg(int argc, char *argv[], Params &params) {
                 params.ctf_seed = convert_int(argv[cnt]);
                 continue;
             }
-            if (strcmp(argv[cnt], "--no-jolt") == 0 || strcmp(argv[cnt], "--cpu") == 0
-                || strcmp(argv[cnt], "--no-gpu") == 0) {
+            if (strcmp(argv[cnt], "--no-gpu-joint") == 0 || strcmp(argv[cnt], "--no-jolt") == 0
+                || strcmp(argv[cnt], "--cpu") == 0 || strcmp(argv[cnt], "--no-gpu") == 0) {   // --no-jolt: deprecated alias
                 // Force the CPU path in a GPU-enabled build (A/B parity). Overrides the GPU default-on.
                 params.no_gpu = true;
                 params.gpu = false;
-                params.jolt = false;
+                params.gpu_joint = false;
                 params.ctf = false;
                 continue;
             }
@@ -5598,10 +5599,23 @@ void parseArg(int argc, char *argv[], Params &params) {
                 params.ts_reopt_split = true;
                 continue;
             }
-            if (strcmp(argv[cnt], "--jolt-diag") == 0) {
+            if (strcmp(argv[cnt], "--gpu-joint-diag") == 0 || strcmp(argv[cnt], "--jolt-diag") == 0) {   // --jolt-diag: deprecated alias
                 // time the optimizeParametersGpuJoint host-rebuild (per-eval echild cost) against the device
-                params.jolt_diag = true;
-                setenv("JOLT_DIAG", "1", 1);   // gate the CUDA-TU echild timer (it cannot see Params)
+                params.gpu_joint_diag = true;
+                setenv("IQTREE_GPU_DIAG", "1", 1);   // gate the CUDA-TU echild timer (it cannot see Params)
+                continue;
+            }
+            if (strcmp(argv[cnt], "--gpu-debug") == 0) {
+                // verbose GPU diagnostic output (gate decisions, tiling, per-model checks) to stderr
+                setenv("IQTREE_GPU_DEBUG", "1", 1);   // read by the CUDA TUs and the host GPU layer
+                continue;
+            }
+            if (strcmp(argv[cnt], "--gpu-ntile") == 0) {
+                // override the automatic pattern-tiling factor for the GPU launchers (advanced/VRAM tuning)
+                cnt++;
+                if (cnt >= argc)
+                    throw "Use --gpu-ntile <num_chunks>";
+                setenv("IQTREE_GPU_NTILE", argv[cnt], 1);   // read via getenv in the CUDA TUs (cannot see Params)
                 continue;
             }
             if (strcmp(argv[cnt], "--ts-screen-check") == 0) {
@@ -7838,7 +7852,7 @@ void Params::setDefault() {
     cmaple_use_local_ref = true;
     cmaple_output_MAT = false;
     gpu = false;
-    jolt = false;
+    gpu_joint = false;
     ctf = false;
     ctf_subsample = 5000;
     ctf_topk = 3;
@@ -7846,7 +7860,7 @@ void Params::setDefault() {
     no_gpu = false;
     ts_diag = false;
     ts_reopt_split = false;
-    jolt_diag = false;
+    gpu_joint_diag = false;
     ts_screen_check = false;
     ts_screen2_check = false;
     ts_screen3_check = false;

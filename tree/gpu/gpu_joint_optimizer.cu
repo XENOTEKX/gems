@@ -20,7 +20,7 @@
 #include <vector>
 #include <functional>   // recursive DFS lambdas over the topology
 #include <mutex>        // serialize GPU access — ModelFinder is across-model OpenMP-parallel
-#include <chrono>       // host-side timer for the per-eval echild rebuild (--jolt-diag)
+#include <chrono>       // host-side timer for the per-eval echild rebuild (--gpu-joint-diag)
 
 // =============================== joint-optimiser private kernels ===============================
 // kj_derv_fused: compute theta = node*dad in registers (never materialised to a
@@ -136,8 +136,8 @@ static DevBuf gbj_echild, gbj_partial, gbj_patlh, gbj_pdf, gbj_pddf,
               gbj_invlbase, gbj_redR,     // base-edge 1/L_p + per-category gradR partials
               gbj_wnum, gbj_redW;         // +R per-category Lc(p) (weight-grad numerator) + its block-reduction partials
 
-// --jolt-diag: per-eval host echild-rebuild cost (host loop + 2 blocking H2D in rebuildEchild). Gated by env
-// JOLT_DIAG (set by --jolt-diag; the CUDA TU cannot see Params). Accumulated across the LM loop; reported per call.
+// --gpu-joint-diag: per-eval host echild-rebuild cost (host loop + 2 blocking H2D in rebuildEchild). Gated by env
+// IQTREE_GPU_DIAG (set by --gpu-joint-diag; the CUDA TU cannot see Params). Accumulated across the LM loop; reported per call.
 static bool   g_gpujoint_diag_init = false;
 static bool   g_gpujoint_diag = false;
 static double g_gpujoint_echild_sec = 0.0;
@@ -164,13 +164,13 @@ extern "C" double gpu_joint_optimize(
     // process-global device state, so concurrent use would clobber. Serialize the
     // whole GPU computation: joint-optimiser models run one at a time on the GPU while other
     // threads keep optimising CPU-fallback candidates.
-    static std::mutex jolt_gpu_mtx;
-    std::lock_guard<std::mutex> jolt_lock(jolt_gpu_mtx);
-    // --jolt-diag: init the gate + snapshot the per-call echild baseline inside the lock, so the across-model
+    static std::mutex gpu_joint_mtx;
+    std::lock_guard<std::mutex> gpu_joint_lock(gpu_joint_mtx);
+    // --gpu-joint-diag: init the gate + snapshot the per-call echild baseline inside the lock, so the across-model
     // OpenMP concurrency can't tear the baseline read or race g_gpujoint_diag_init.
-    if (!g_gpujoint_diag_init) { g_gpujoint_diag = (std::getenv("JOLT_DIAG") != nullptr); g_gpujoint_diag_init = true; }
+    if (!g_gpujoint_diag_init) { g_gpujoint_diag = (std::getenv("IQTREE_GPU_DIAG") != nullptr); g_gpujoint_diag_init = true; }
     double _gj_ech0 = g_gpujoint_echild_sec; long _gj_echn0 = g_gpujoint_echild_n;
-    // Reopt proof-counters (JOLT_DEBUG): per-call tally of reopt coefficient uploads. Function-local (reset per
+    // Reopt proof-counters (IQTREE_GPU_DEBUG): per-call tally of reopt coefficient uploads. Function-local (reset per
     // call); guarded by the GPU mutex above.
     long ts_reopt_mcs = 0;   // cudaMemcpyToSymbol count (g_val0/1/2 + g_rscale per edge)
     long ts_reopt_vp  = 0;   // cudaMemcpyAsync-to-valpool count
@@ -223,7 +223,7 @@ extern "C" double gpu_joint_optimize(
     // scratch, tip/patlh/...) shrinks by ~nTile. The chunk-independent echild/expfac/eigen constants are built once
     // per (brlen,alpha,pinv,Q) point (rebuildEchild), not per chunk.
     int nTile = 1;
-    if (const char* e = getenv("JOLT_NTILE")) { nTile = atoi(e); if (nTile < 1) nTile = 1; }
+    if (const char* e = getenv("IQTREE_GPU_NTILE")) { nTile = atoi(e); if (nTile < 1) nTile = 1; }
     else {
         // auto-pick from free VRAM: estimate the one-shot footprint, target 80% of free, round up.
         size_t slot1 = (size_t)ncat*ns*nptn*sizeof(double);
@@ -240,7 +240,7 @@ extern "C" double gpu_joint_optimize(
         }
     }
     if (freeRate) nTile = 1;   // +R (freeRate 1 and 2) runs on full-nptn buffers; no pattern tiling
-    if (getenv("JOLT_DEBUG")) {
+    if (getenv("IQTREE_GPU_DEBUG")) {
         size_t fB=0,tB=0; cudaMemGetInfo(&fB,&tB);
         fprintf(stderr,"[GPU-JOINT-TILE] nptn=%d ns=%d ncat=%d nInternal=%d nPool=%d -> nTile=%d (chunk~%d ptn); freeVRAM=%.1f GB\n",
                 nptn,ns,ncat,nInternal,nPool,nTile,(nptn+nTile-1)/nTile,(double)fB/1073741824.0); fflush(stderr);
@@ -329,14 +329,14 @@ extern "C" double gpu_joint_optimize(
         ec=d_echild+(size_t)w*ecStride; sp=nullptr; st=nullptr;
         if(leaf[w]>=0) st=d_tip+(size_t)leaf[w]*Pn; else sp=d_partial+(size_t)slot[w]*slotSz; };
     auto rebuildEchild=[&](){
-        std::chrono::steady_clock::time_point _gj_e0; if(g_gpujoint_diag) _gj_e0 = std::chrono::steady_clock::now();   // --jolt-diag timer
+        std::chrono::steady_clock::time_point _gj_e0; if(g_gpujoint_diag) _gj_e0 = std::chrono::steady_clock::now();   // --gpu-joint-diag timer
         for(int c=0;c<nnodes;c++){ if(c==root){ for(size_t z=0;z<ecStride;z++) h_echild[(size_t)c*ecStride+z]=0.0; continue; }
             for(int cat=0;cat<ncat;cat++){ double len=brlen[c]*catRate[cat]; double ex[NS_MAX]; for(int i=0;i<ns;i++) ex[i]=exp(evalP[i]*len);
                 double* e=&h_echild[(size_t)c*ecStride+(size_t)cat*ns*ns]; for(int x=0;x<ns;x++) for(int i=0;i<ns;i++) e[x*ns+i]=UP[x*ns+i]*ex[i];
                 for(int i=0;i<ns;i++) h_expfac[(size_t)c*ncat*ns+cat*ns+i]=ex[i]; } }
         cudaMemcpy(d_echild,h_echild.data(),(size_t)nnodes*ecStride*sizeof(double),cudaMemcpyHostToDevice);
         cudaMemcpy(d_expfac,h_expfac.data(),(size_t)nnodes*ncat*ns*sizeof(double),cudaMemcpyHostToDevice);
-        if(g_gpujoint_diag){ g_gpujoint_echild_sec += std::chrono::duration<double>(std::chrono::steady_clock::now()-_gj_e0).count(); g_gpujoint_echild_n++; } };   // --jolt-diag: echild cost
+        if(g_gpujoint_diag){ g_gpujoint_echild_sec += std::chrono::duration<double>(std::chrono::steady_clock::now()-_gj_e0).count(); g_gpujoint_echild_n++; } };   // --gpu-joint-diag: echild cost
     auto postorderFill=[&](){
         for(int idx=0; idx<nInternal; idx++){ int u=postorder[idx]; if(u==root) continue;
             int nch; const double* ec[3]; const double* p[3]; const unsigned char* t[3]; childArgs(u,-1,nch,ec,p,t);
@@ -370,12 +370,12 @@ extern "C" double gpu_joint_optimize(
         if(leaf[v]<0) return d_partial+(size_t)slot[v]*slotSz;
         k_leaf_eig<<<GB,TB>>>(ns,Pn,ncat,d_tip+(size_t)leaf[v]*Pn,d_tipeig); return d_tipeig; };
 
-    // ============ +R weight-gradient finite-difference self-check (gated by JOLT_RGRADCHECK) ============
+    // ============ +R weight-gradient finite-difference self-check (gated by IQTREE_GPU_RGRADCHECK) ============
     // Validates the softmax weight gradient gz_c = WN_c - w_c*N against central FD on the real GPU path. Weights
     // enter only through g_val0 (setVal), not the partials/echild, and Lc(p) is edge-invariant, so WN_c comes from
     // the base edge and each FD perturbation re-runs only setVal + one base-edge kj_derv_fused.
     if (freeRate) {
-        if (getenv("JOLT_RGRADCHECK")) {
+        if (getenv("IQTREE_GPU_RGRADCHECK")) {
             setChunk(0);   // nTile==1 for +R — upload the (whole) tip/ptn_freq/base_invar slice
             rebuildEchild(); postorderFill();
             int nch; const double* ec[3]; const double* p[3]; const unsigned char* tp[3]; childArgs(root,c0,nch,ec,p,tp);
@@ -658,7 +658,7 @@ extern "C" double gpu_joint_optimize(
     if(nFreeQ>0 && out_q) for(int k=0;k<nFreeQ;k++) out_q[k]=qcur[k];
     if(freeRate==1 && out_rates && out_props) for(int c=0;c<ncat;c++){ out_rates[c]=catRate[c]; out_props[c]=catProp_v[c]; }   // optimised +R rates/weights
     if(out_iters) *out_iters=it;
-    // --jolt-diag: nRej = rejected backtracks (each a discarded full postorder), nLnLEval = total evalLnL postorders.
+    // --gpu-joint-diag: nRej = rejected backtracks (each a discarded full postorder), nLnLEval = total evalLnL postorders.
     if(g_gpujoint_diag) printf("GPU-JOINT-DIAG-CU echild=%.6f n=%ld iters=%d nRej=%d nLnLEval=%ld nptn=%d\n", g_gpujoint_echild_sec-_gj_ech0, g_gpujoint_echild_n-_gj_echn0, it, nRej, nLnLEval, nptn);
     (void)ts_reopt_mcs; (void)ts_reopt_vp;
     return lnL;
