@@ -413,3 +413,64 @@ jobs:
         shell: pwsh
         run: |
           ./test_scripts/verify_memory.ps1 -IQTree2Log time_log_iqtree2.tsv -IQTree3Log time_log_iqtree3.tsv -FallbackColumn windows-x86
+
+  build-gpu-cuda-compile:
+    name: GPU module (CUDA compile-only -- no GPU on this runner)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+          fetch-depth: 0 # full history: needed to diff against the recorded upstream base SHA below
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y gcc g++ libeigen3-dev libboost-dev
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.19
+        id: cuda-toolkit
+        with:
+          cuda: "12.5.0"
+          method: network
+
+      - name: Configure (IQTREE_GPU=ON)
+        run: |
+          mkdir build
+          cd build
+          cmake .. -DIQTREE_GPU=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      # Honest CI scope: GitHub-hosted runners have no GPU, so this job can only prove the GPU module
+      # (tree/gpu/ + tests/gpu/) compiles and links against the CUDA toolkit. It does NOT execute any
+      # kernel or prove GPU==CPU numerics -- those correctness proofs run on Gadi as PBS jobs and their
+      # logs are committed as the evidence of record. Do not read a green check here as a runtime proof.
+      - name: Build (compile + link only)
+        run: |
+          cd build
+          make -j
+          file iqtree3 | grep x86-64
+          ldd iqtree3 | grep -i cuda
+
+      - name: Assert vendored/third-party directories are unchanged vs the upstream fork point
+        run: |
+          BASE_SHA=4e91dd61447c301a896014002b3509bec05f8ab1 # IQ-TREE 3.1.2 release (recorded GEMS fork point)
+          VENDORED="alignment booster cmaple gsl lbfgsb lsd2 ncl nclextra pll phylo-yaml simulator sprng terrace terracetphast terraphast vectorclass whtest yaml-cpp zlib-1.2.7"
+          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
+            echo "::warning::base SHA $BASE_SHA not reachable in this checkout -- skipping the unchanged-vendored-dir check"
+            exit 0
+          fi
+          fail=0
+          for d in $VENDORED; do
+            [ -d "$d" ] || continue
+            diff_out=$(git diff --name-only "$BASE_SHA" HEAD -- "$d")
+            if [ -n "$diff_out" ]; then
+              echo "::error::vendored directory '$d' differs from the upstream fork point -- GEMS should never touch third-party code:"
+              echo "$diff_out"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] && echo "all vendored/third-party directories are byte-identical to the upstream fork point"
+          exit $fail
