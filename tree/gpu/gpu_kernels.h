@@ -25,3 +25,17 @@ __global__ void kj_pre(int ns, int nptn, int ncat, double* __restrict__ out_pre,
         const double* __restrict__ pre_u, const double* __restrict__ expfac_u,
         int nsib, const double* ec0, const double* sp0, const unsigned char* st0,
                  const double* ec1, const double* sp1, const unsigned char* st1);
+
+// Profile-mixture single-edge branch derivative (regime axis R = nmix*ncat).
+// Defined in gpu_kernels_mixture.cu; also launched by the tree-search screener.
+__global__ void k2_derv_mix(int ns, int nptn, int R,
+        const double* __restrict__ node_eig, const double* __restrict__ dad_eig,
+        const double* __restrict__ dval0, const double* __restrict__ dval1, const double* __restrict__ dval2,
+        double* __restrict__ pdf, double* __restrict__ pddf, double* __restrict__ patlh);
+
+// As k2_derv_mix, plus the +I invariant term pinv*baseinvar[ptn] (used when pinv>0).
+__global__ void k2_derv_mix_inv(int ns, int nptn, int R,
+        const double* __restrict__ node_eig, const double* __restrict__ dad_eig,
+        const double* __restrict__ dval0, const double* __restrict__ dval1, const double* __restrict__ dval2,
+        double pinv, const double* __restrict__ baseinvar,
+        double* __restrict__ pdf, double* __restrict__ pddf, double* __restrict__ patlh);

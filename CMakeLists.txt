@@ -957,6 +957,7 @@ if (IQTREE_GPU)
         tree/gpu/gpu_diag.cu
         tree/gpu/gpu_lnl_intree.cu
         tree/gpu/gpu_joint_optimizer.cu
+        tree/gpu/gpu_kernels_mixture.cu
         tree/gpu/gpu_parsimony.cu)
     set_target_properties(iqtree_gpu PROPERTIES
         CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"

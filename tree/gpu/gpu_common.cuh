@@ -47,6 +47,11 @@ static __device__ __forceinline__ void accum_child(double* prod, int ns, int c, 
 // (never freed; released at process exit). Contents are overwritten every call.
 struct DevBuf { void* p = nullptr; size_t cap = 0; };
 
+// Single-model likelihood/derivative pools, defined in gpu_kernels_lnl.cu. The
+// mixture launchers reuse them (resized on demand) rather than keep a second set,
+// so they are declared extern here for cross-translation-unit access.
+extern DevBuf gb_echild, gb_tip, gb_partial, gb_patlh, gb_pdf, gb_pddf, gb_nodeleaf, gb_dadleaf;
+
 // Ensure a buffer holds at least `need` bytes; returns false on cudaMalloc failure.
 // Defined in gpu_kernels_lnl.cu.
 bool devbuf_ensure(DevBuf& b, size_t need);
