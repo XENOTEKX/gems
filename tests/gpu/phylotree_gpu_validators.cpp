@@ -15,8 +15,8 @@
 #include "iqtree_config.h"
 #ifdef IQTREE_GPU
 
-#include "phylotree.h"
-#include "phylonode.h"
+#include "tree/phylotree.h"
+#include "tree/phylonode.h"
 #include "model/modelsubst.h"
 #include "model/modelmixture.h"
 #include "model/rateheterogeneity.h"
