@@ -42,6 +42,7 @@ phylosupertreeunlinked.cpp
 phylosupertreeunlinked.h
 phylotree.cpp
 phylotreegpu.cpp
+../tests/gpu/phylotree_gpu_validators.cpp
 phylotree.h
 phylotreemixlen.cpp
 phylotreemixlen.h

@@ -2177,7 +2177,8 @@ public:
         so the virtual swap is honored; reuses gpuComputeEdgeDervCleanRoom's two-sub-root machinery and
         gpu_derv_crosscheck. *out_lnL = whole-tree lnL of the swapped topology at the central old length
         (== the CPU --ts-reopt-split tsr_pre oracle). Returns df (un-negated); NaN if unsupported (same gate
-        as gpuComputeEdgeDervCleanRoom). Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
+        as gpuComputeEdgeDervCleanRoom). Diagnostic-only (--ts-screen2-check / --ts-screen3-check); defined in
+        tests/gpu/phylotree_gpu_validators.cpp under #ifdef IQTREE_GPU. */
     double gpuScreenNNICleanRoom(PhyloNode *node1, PhyloNode *node2,
                                  PhyloNeighbor *node1_nei, PhyloNeighbor *node2_nei,
                                  double *out_ddf, double *out_lnL);
@@ -2186,7 +2187,8 @@ public:
         OLD lengths as gpuScreenNNICleanRoom, but from ONE resident postorder over the PHYSICAL tree + a
         re-pairing fold (two k1_node folds + k2_derv re-grouping the 4 surrounding subtrees) -- NO swap-aware DFS,
         NO new kernel. The perf-core primitive for the batched L2 screener. *out_lnL == gpuScreenNNICleanRoom to
-        1e-9. Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
+        1e-9. Diagnostic-only (--ts-screen3-check, also the batch/tile validators' internal oracle); defined in
+        tests/gpu/phylotree_gpu_validators.cpp under #ifdef IQTREE_GPU. */
     double gpuScreenNNIFoldCleanRoom(PhyloNode *node1, PhyloNode *node2,
                                      PhyloNeighbor *node1_nei, PhyloNeighbor *node2_nei,
                                      double *out_ddf, double *out_lnL);
@@ -2194,8 +2196,9 @@ public:
     /** PERSISTENT-UPPER preorder validator. ONE fixed-root postorder (resident lowers) + ONE
         preorder with a persistent per-node upper buffer; checks the invariant that every internal edge's lnL =
         k2_derv(lower_v, pre_v, b_v) equals the whole-tree lnL (reversible). Validates the persistent-upper substrate
-        3b-ii's re-pairing reuses. Returns false if ineligible / CUDA error. Defined only in tree/phylotreegpu.cpp
-        under #ifdef IQTREE_GPU. Out: max rel-err over edges, #edges, #pass@1e-9, #bit-exact, tree lnL. */
+        3b-ii's re-pairing reuses. Returns false if ineligible / CUDA error. Diagnostic-only (--ts-upper-check);
+        defined in tests/gpu/phylotree_gpu_validators.cpp under #ifdef IQTREE_GPU. Out: max rel-err over edges,
+        #edges, #pass@1e-9, #bit-exact, tree lnL. */
     bool gpuAllBranchUpperCheckCleanRoom(double *out_max_rel, long long *out_nedge, long long *out_npass,
                                          long long *out_nbitexact, double *out_tree_lnL);
 
@@ -2203,7 +2206,8 @@ public:
         (built once), then scores every inner branch's 2 NNI moves as cheap folds off the resident state; cross-checks
         each move vs gpuScreenNNIFoldCleanRoom (the 3a oracle) and times the batch vs the M per-move oracle calls.
         Returns false if ineligible / no moves. Out: max rel-err vs 3a, #moves, #pass@1e-9, tree lnL, and the two
-        wall times. Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
+        wall times. Diagnostic-only (--ts-batch-check); defined in tests/gpu/phylotree_gpu_validators.cpp under
+        #ifdef IQTREE_GPU. */
     bool gpuScreenNNIBatchCleanRoom(double *out_max_rel, long long *out_nmove, long long *out_npass,
                                     double *out_tree_lnL, double *out_wall_batched, double *out_wall_oracle);
 
@@ -2212,7 +2216,8 @@ public:
         tiled move == the untiled 3a oracle to 1e-9 (works at all scales). BONUS (example scale, nTile=1 fits):
         the auto-tiled per-move lnLs are BIT-IDENTICAL to forced nTile in {3,7} and to the frozen 3b-ii batch launcher.
         Out: max rel-err, #moves, #pass@1e-9, tree lnL, the two wall times, the auto-picked nTile, and the
-        bit-identity count (-1 = skipped because nTile=1 OOMs). Defined only under #ifdef IQTREE_GPU. */
+        bit-identity count (-1 = skipped because nTile=1 OOMs). Diagnostic-only (--ts-tile-check); defined in
+        tests/gpu/phylotree_gpu_validators.cpp under #ifdef IQTREE_GPU. */
     bool gpuScreenNNITileCleanRoom(double *out_max_rel, long long *out_nmove, long long *out_npass,
                                    double *out_tree_lnL, double *out_wall_tiled, double *out_wall_oracle,
                                    int *out_ntile, long long *out_bitexact, long long *out_nmoves_total);
@@ -2227,11 +2232,6 @@ public:
     bool gpuScreenNNIRank(std::map<int,double> &branchBest,
                           std::map<int,std::pair<double,double> > *branchBoth,
                           int *out_ntile, double *out_wall_screen);
-
-    /** reference single-edge df/ddf for a PROFILE MIXTURE (df/ddf summed over N*ncat regimes).
-        Returns df=d(lnL)/dt (un-negated); *out_ddf, *out_lnL. NaN if unsupported (single-model / +I / fused /
-        PMSF / non-reversible / num_states not in {4,20}). Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
-    double gpuComputeEdgeDervCleanRoomMix(PhyloNeighbor *dad_branch, PhyloNode *dad, double *out_ddf, double *out_lnL);
 
     /** reference ALL-BRANCH df/ddf for a PROFILE MIXTURE (Ji-2020 linear-time: one postorder + one
         preorder sweep -> every edge). Fills four parallel out-vectors per non-root node v (edge v->parent):

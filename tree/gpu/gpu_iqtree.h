@@ -243,28 +243,6 @@ double gpu_screen_nni_tile_crosscheck(
     const double* baseinvar = nullptr, double pinv = 0.0);   // +I (defaults keep non-+I callers unchanged)
 
 /**
-   Profile-mixture single-edge derivative (df/ddf class-summed). Mirrors
-   gpu_derv_crosscheck but the sweep is per-regime (k1_node_mix), the central-edge
-   coefficients are per-class in global memory, and weights are per-regime
-   (wreg[r] = w_m*catProp_c).
-   @param evalC per-class eigenvalues [nmix*nstates]
-   @return df, or NaN on CUDA error.
- */
-double gpu_derv_crosscheck_mix(
-    int nstates, int nptn, int ncat, int nmix, int ntax, int nnodes, int nInternal,
-    const double* Uinv, const double* UinvRowSum, const double* freq, const double* wreg,
-    const double* echild, const unsigned char* tip, const double* ptn_freq,
-    const int* desc_isRoot, const int* desc_nchild, const int* desc_outSlot,
-    const int* desc_childNode, const int* desc_childIsLeaf, const int* desc_childLeaf, const int* desc_childSlot,
-    int nodeSlot, int nodeLeafTax,
-    int dadSlot,  int dadLeafTax,
-    const double* evalC,         // nmix*nstates (per-class eigenvalues)
-    const double* catRate,       // ncat
-    double t,
-    double* out_ddf,
-    double* out_lnL);
-
-/**
    All-branch derivative launcher for profile mixtures (linear-time gradient: one
    postorder + one preorder sweep yields df/ddf for every edge). d_U
    (eigenvectors, k7_pre_mix's up-map) and the per-node expfac =

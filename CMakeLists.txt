@@ -303,14 +303,8 @@ endif()
 # iqtree_config.h.in is substituted from this cache variable. OFF by default,
 # so a CPU-only build is unaffected (no CUDA language, no .cu sources, no link).
 option(IQTREE_GPU "Build in-tree CUDA GPU ModelFinder kernels" OFF)
-# Dev-only: compile in the one-shot GPU vs CPU clean-room cross-checks (lnL / derivative / mixture / free-Q).
-# OFF for production GPU builds (the checks are validation scaffolding, already runtime-off under --jolt).
-option(JOLT_DEBUG_BUILD "Compile the GPU dev cross-checks (requires IQTREE_GPU)" OFF)
 if (IQTREE_GPU)
     message("Build CUDA GPU kernels: ON")
-    if (JOLT_DEBUG_BUILD)
-        message("JOLT_DEBUG_BUILD=ON: GPU dev cross-checks compiled in")
-    endif()
 else()
     message("Build CUDA GPU kernels: OFF")
 endif()
