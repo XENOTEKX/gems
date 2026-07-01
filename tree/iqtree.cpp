@@ -930,10 +930,10 @@ void IQTree::initCandidateTreeSet(int nParTrees, int nNNITrees) {
             // the per-initial-tree branch-length optimization (this loop, "Computing
             // log-likelihood of N initial trees") is ~25% of the tree-search wall and runs CPU-only on the
             // GPU node's few cores -> route it through the validated production GPU optimizer when --ts-fused
-            // is engaged. NaN (JOLT-GATE decline / failure) -> CPU optimizeBranches fallback, so the retained
-            // score is always a real all-branch lnL. Disable with TS_INIT_JOLT_OFF=1 (A/B reference). CPU path
+            // is engaged. NaN (GPU-Joint decline / failure) -> CPU optimizeBranches fallback, so the retained
+            // score is always a real all-branch lnL. Disable with TS_INIT_GPUJOINT_OFF=1 (A/B reference). CPU path
             // is byte-identical when ts_fused is off or in non-GPU builds.
-            if (params->ts_fused && getenv("TS_INIT_JOLT_OFF") == nullptr) {
+            if (params->ts_fused && getenv("TS_INIT_GPUJOINT_OFF") == nullptr) {
                 double _jb = optimizeAllBranchesGpuJoint();
                 if (_jb == _jb) {                                       // GPU succeeded (finite)
                     curScore = _jb;
@@ -2906,7 +2906,7 @@ double IQTree::doTreeSearch() {
         cout << "TS-RECALL =======================================================================" << endl;
     }
     if (params->ts_shadow) {
-        cout << "TS-SHADOW ===== TS.6 committed counterfactual (CPU JOLT stand-in) =====" << endl;
+        cout << "TS-SHADOW ===== TS.6 committed counterfactual (CPU GPU-Joint stand-in) =====" << endl;
         cout << "TS-SHADOW rounds            " << shadow_rounds << endl;
         cout << "TS-SHADOW applied_total     " << shadow_applied_total << endl;
         cout << "TS-SHADOW batch_rejects     " << shadow_rejects   << "   (whole-batch reopt regressed -> rolled back)" << endl;
@@ -2964,7 +2964,7 @@ double IQTree::doTreeSearch() {
         cout << "TS-FUSED surfaced_fused    " << tsfused_surfaced << "   (geometry moves from the screener, NO per-move nni5 = the 78.6% surface)" << endl;
         cout << "TS-FUSED onesided_skipped  " << tsfused_onesided << "   (one-NaN branches skipped: geometry not FM-1-verifiable, outside certified envelope)" << endl;
         cout << "TS-FUSED hybrid_nni5       " << tsfused_hybrid   << "   (top-M branches that still took exact nni5; --ts-fused-topm " << params->ts_fused_nni5_topm << ")" << endl;
-        cout << "TS-FUSED batch_rejects     " << tsfused_rejects   << "   (whole-batch JOLT reopt regressed -> rolled back)" << endl;
+        cout << "TS-FUSED batch_rejects     " << tsfused_rejects   << "   (whole-batch GPU-Joint reopt regressed -> rolled back)" << endl;
         cout << "TS-FUSED single_fallbacks  " << tsfused_fallbacks << "   (rejected batch -> single nni5-best)" << endl;
         cout << "TS-FUSED final_lnL         " << candidateTrees.getBestScore() << "   (compare to nni5 baseline; PASS if within 0.5)" << endl;
         cout << "TS-FUSED =====================================================" << endl;
@@ -3799,25 +3799,25 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
         if (params->ts_fused) {
             // ===== the PRODUCTION fused apply. positiveNNIs already carry screener
             // geometry + score (built in evaluateNNIsScreened with NO per-move nni5). This is the shadow-certified
-            // SELECTION rule (easy+hard PASS) over the -gated GEOMETRY source, with the JOLT-stand-in replaced by
+            // SELECTION rule (easy+hard PASS) over the -gated GEOMETRY source, with the GPU-Joint-stand-in replaced by
             // the real GPU optimizeAllBranchesGpuJoint. Select old-length-positive (already filtered to gbest>curScore in
-            // evaluateNNIsScreened), apply the compatible node-disjoint subset TOPOLOGY-ONLY, ONE global JOLT reopt,
+            // evaluateNNIsScreened), apply the compatible node-disjoint subset TOPOLOGY-ONLY, ONE global GPU-Joint reopt,
             // round-level accept-or-rollback + single-best nni5 fallback (guarantees progress/termination via the stop
-            // rule below). NaN JOLT (ineligible regime / CUDA error) -> exact CPU optimizeAllBranches(1) fallback.
+            // rule below). NaN GPU-Joint (ineligible regime / CUDA error) -> exact CPU optimizeAllBranches(1) fallback.
             tsfused_rounds++;
             sort(positiveNNIs.begin(), positiveNNIs.end(),
                  [](const NNIMove &a, const NNIMove &b) { return a.preloglh > b.preloglh; });   // rank by screener score DESC
             appliedNNIs.clear();
             getCompatibleNNIs(positiveNNIs, appliedNNIs);
             if (appliedNNIs.empty()) break;            // no surfaced old-length-positive move -> stops (== shadow)
-            doNNIs(appliedNNIs, /*changeBran=*/false); // TOPOLOGY ONLY (swapped subtree keeps OLD length = JOLT warm start)
+            doNNIs(appliedNNIs, /*changeBran=*/false); // TOPOLOGY ONLY (swapped subtree keeps OLD length = GPU-Joint warm start)
 #ifdef IQTREE_GPU
             double _tsdr = params->ts_diag ? getRealTime() : 0.0;
             double _jf = optimizeAllBranchesGpuJoint();    // ONE global GPU reopt over ALL branches
             curScore = (_jf == _jf) ? _jf : optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
             if (params->ts_diag) tsd_t_fusedreopt += getRealTime() - _tsdr;
 #else
-            curScore = optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);   // CPU build: no JOLT (portability stub; --ts-fused is a GPU feature)
+            curScore = optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);   // CPU build: no GPU-Joint (portability stub; --ts-fused is a GPU feature)
 #endif
             tsfused_applied_total += appliedNNIs.size();
             if (curScore > oldScore + params->loglh_epsilon) {
@@ -3839,10 +3839,10 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
                     curScore = (_jf2 == _jf2) ? _jf2 : optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
                     if (params->ts_diag) tsd_t_fusedreopt += getRealTime() - _tsdr2;
 #else
-                    curScore = optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);   // CPU build: no JOLT (portability stub)
+                    curScore = optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);   // CPU build: no GPU-Joint (portability stub)
 #endif
                     // RED-TEAM F1: re-check the POST-reopt lnL (the non-fused path ASSERTs "1 NNI can't worsen"; we must
-                    // not commit on the screener/nni5 ESTIMATE alone). If JOLT under-converges / device-lnL dips on this
+                    // not commit on the screener/nni5 ESTIMATE alone). If GPU-Joint under-converges / device-lnL dips on this
                     // far-from-optimum tree, revert -> the fused branch is monotone-or-stop, never returns below oldScore.
                     if (curScore > oldScore + params->loglh_epsilon) {
                         totalNNIApplied++;
@@ -3859,8 +3859,8 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
         } else if (params->ts_shadow) {
             // ===== SHADOW (CPU emulation, --ts-shadow): FALSIFY BEFORE building =====
             // Select by OLD-LENGTH preloglh (the apply gate that DROPS nni5 "late-bloomers"), apply the
-            // compatible node-disjoint subset TOPOLOGY-ONLY, ONE global optimizeAllBranches (the JOLT stand-in;
-            // sweepIter=100 under --ts-shadow-converge brackets JOLT's converged strength), then a round-level
+            // compatible node-disjoint subset TOPOLOGY-ONLY, ONE global optimizeAllBranches (the GPU-Joint stand-in;
+            // sweepIter=100 under --ts-shadow-converge brackets the GPU-Joint optimiser's converged strength), then a round-level
             // accept-or-rollback + single-best nni5 fallback (guarantees progress/termination via the stop rule
             // below). COMMITS the rule => the final tree is a true counterfactual whose final lnL is compared
             // to the nni5 baseline. Does NOT test  (GPU geometry): node1Nei_it/node2Nei_it come CPU-correct
@@ -3902,7 +3902,7 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
                     }
                 }
             }
-            curScore = optimizeAllBranches(sweepIter, params->loglh_epsilon, PLL_NEWZPERCYCLE);    // global reopt = JOLT stand-in
+            curScore = optimizeAllBranches(sweepIter, params->loglh_epsilon, PLL_NEWZPERCYCLE);    // global reopt = GPU-Joint stand-in
             // ===== LBR G1 (C): post-reopt lengths + per-branch |deltalen| and bucket-distance. Traverse the tree ONCE
             // (lbrCollectEdges mirrors saveBranchLengths) to recover each branch id + its two endpoint node ids.
             // dlen[id] indexed strictly by branch id (shared by both half-edges); bd[id] = min endpoint BFS dist.
@@ -4019,8 +4019,8 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
         doNNIs(appliedNNIs);
         double _tsda = params->ts_diag ? getRealTime() : 0.0;
 #ifdef IQTREE_GPU
-        // lean in-loop JOLT all-branch reopt. NaN (ineligible regime / CUDA error) -> exact CPU fallback.
-        if (params->ts_jolt_allbr) {
+        // lean in-loop GPU-Joint all-branch reopt. NaN (ineligible regime / CUDA error) -> exact CPU fallback.
+        if (params->ts_gpujoint_allbr) {
             double _jlnl = optimizeAllBranchesGpuJoint();
             curScore = (_jlnl == _jlnl) ? _jlnl
                      : optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
@@ -4042,7 +4042,7 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
                 doNNIs(appliedNNIs);
                 double _tsda2 = params->ts_diag ? getRealTime() : 0.0;
 #ifdef IQTREE_GPU
-                if (params->ts_jolt_allbr) {
+                if (params->ts_gpujoint_allbr) {
                     double _jlnl2 = optimizeAllBranchesGpuJoint();
                     curScore = (_jlnl2 == _jlnl2) ? _jlnl2
                              : optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
@@ -4501,7 +4501,7 @@ void IQTree::evaluateNNIsScreened(Branches &nniBranches, vector<NNIMove> &positi
             double gbest = (w == 0) ? g0 : g1;
             if (gbest <= curScore) continue;            // OLD-LENGTH-positive gate (== shadow preloglh>curScore)
             NNIMove geo[2]; enumerateNNIGeometry(fn1, fn2, geo);
-            geo[w].newloglh = geo[w].preloglh = gbest;  // screener score; the real post-reopt lnL comes from the global JOLT
+            geo[w].newloglh = geo[w].preloglh = gbest;  // screener score; the real post-reopt lnL comes from the global GPU-Joint reopt.
             positiveNNIs.push_back(geo[w]);
             tsfused_surfaced++;
             if (params->ts_diag) tsd_n_positive++;

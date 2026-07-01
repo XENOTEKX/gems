@@ -5687,9 +5687,10 @@ void parseArg(int argc, char *argv[], Params &params) {
                 params.ts_adaptive_delta = convert_double(argv[cnt]);
                 continue;
             }
-            if (strcmp(argv[cnt], "--ts-jolt-allbr") == 0) {
-                // lean in-loop JOLT all-branch reopt replaces the post-NNI CPU optimizeAllBranches(1).
-                params.ts_jolt_allbr = true;
+            if (strcmp(argv[cnt], "--ts-gpu-joint-allbr") == 0
+                || strcmp(argv[cnt], "--ts-jolt-allbr") == 0) {   // --ts-jolt-allbr: deprecated alias
+                // lean in-loop GPU-Joint all-branch reopt replaces the post-NNI CPU optimizeAllBranches(1).
+                params.ts_gpujoint_allbr = true;
                 continue;
             }
             if (strcmp(argv[cnt], "--ts-shadow") == 0) {
@@ -5712,7 +5713,7 @@ void parseArg(int argc, char *argv[], Params &params) {
                 continue;
             }
             if (strcmp(argv[cnt], "--ts-shadow-converge") == 0) {
-                // shadow with a converged global reopt (optimizeAllBranches(100)) -> brackets JOLT's reopt strength.
+                // shadow with a converged global reopt (optimizeAllBranches(100)) -> brackets the GPU-Joint optimiser's reopt strength.
                 params.ts_shadow = true;
                 params.ts_shadow_converge = true;
                 params.ts_reopt_split = true;
@@ -5728,10 +5729,10 @@ void parseArg(int argc, char *argv[], Params &params) {
                 continue;
             }
             if (strcmp(argv[cnt], "--ts-fused") == 0) {
-                // production fused apply: screener-positive select + one global JOLT reopt.
+                // production fused apply: screener-positive select + one global GPU-Joint reopt.
                 params.ts_fused = true;
                 params.ts_screen_adaptive = true; // phase-aware top-k selection over the screener
-                params.ts_jolt_allbr = true;      // the global JOLT reopt
+                params.ts_gpujoint_allbr = true;      // the global GPU-Joint reopt
                 params.ts_reopt_split = true;
                 continue;
             }
@@ -7873,11 +7874,11 @@ void Params::setDefault() {
     ts_adaptive_kmin = 8;       // always refine at least the top-8 (settled-phase floor)
     ts_adaptive_kmax = 0;       // 0 => all branches (full breadth allowed during recovery)
     ts_adaptive_delta = 0.0;    // count strictly-improving swaps; >0 widens the net (safer for late-bloomers)
-    ts_jolt_allbr = false;      // lean in-loop JOLT all-branch reopt for optallbranches; off = stock CPU sweep
+    ts_gpujoint_allbr = false;      // lean in-loop GPU-Joint all-branch reopt for optallbranches; off = stock CPU sweep
     ts_shadow = false;          // CPU validation of the fused select + global-reopt rule
     ts_shadow_converge = false; // shadow with converged optimizeAllBranches(100) reopt bracket
     ts_lbr_measure = false;     // read-only moved-branch/distance instrument riding the --ts-shadow apply path
-    ts_fused = false;           // production fused apply (screener-positive + global JOLT reopt)
+    ts_fused = false;           // production fused apply (screener-positive + global GPU-Joint reopt)
     ts_fused_check = false;     // validation-only geometry + mi==cnt mapping check
     ts_fused_nni5_topm = 0;     // hybrid: nni5 on top-M screener branches (0 = pure fused)
     ts_subsample = 0;           // coarse tree-search site-subsample (0 = off => byte-identical)

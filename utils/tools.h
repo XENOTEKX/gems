@@ -3022,7 +3022,7 @@ public:
         optimizeAllBranchesGpuJoint -> brlen-only gpu_joint_optimize, lean tail: no clearAllPartialLH or CPU
         self-check). NaN -> CPU fallback. Not bit-exact (joint-optimiser converges harder than a single CPU sweep), so
         it is gated on quality, not byte-identity. Off by default. */
-    bool ts_jolt_allbr;
+    bool ts_gpujoint_allbr;
 
     /** Apply the fused selection rule on the CPU path for validation (--ts-shadow, CPU-only build): apply the
         compatible node-disjoint old-length-positive (preloglh>cur) subset topology-only, then one global
