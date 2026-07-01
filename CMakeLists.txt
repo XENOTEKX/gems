@@ -956,7 +956,8 @@ if (IQTREE_GPU)
     add_library(iqtree_gpu STATIC tree/gpu/gpu_diag.cu tree/gpu/gpu_lnl_intree.cu)
     set_target_properties(iqtree_gpu PROPERTIES
         CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
-        POSITION_INDEPENDENT_CODE ON)
+        POSITION_INDEPENDENT_CODE ON
+        CUDA_SEPARABLE_COMPILATION ON)
     target_include_directories(iqtree_gpu PRIVATE
         "${PROJECT_SOURCE_DIR}" "${PROJECT_BINARY_DIR}")
     # Explicitly link the CUDA runtime PUBLIC so it propagates to iqtree3 (which
