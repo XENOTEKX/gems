@@ -39,8 +39,8 @@ using namespace std;
 
 // Process-wide lock for optimizeParametersGpuJointMix. The mixture reference launchers (gpu_lnl_crosscheck_mix and
 // the all-branch-derivative launcher) are not internally mutexed (unlike gpu_joint_optimize, which holds its own
-// lock), and ModelFinder scores candidate models OpenMP-parallel across models. Without this, concurrent JOLTMix
-// calls would race the single GPU's constant memory, so JOLTMix serializes on the one GPU; ineligible candidates
+// lock), and ModelFinder scores candidate models OpenMP-parallel across models. Without this, concurrent GPU-Joint
+// mixture calls would race the single GPU's constant memory, so the mixture path serializes on the one GPU; ineligible candidates
 // still run N-parallel on the CPU.
 static std::mutex gpu_mixjoint_mtx;
 
@@ -1911,9 +1911,9 @@ void PhyloTree::setLikelihoodKernelGPU() {
 // optimised Q is written back deterministically after gpu_joint_optimize returns (do not rely on the launcher's
 // internal Q updates leaving the model in any particular state).
 // ============================================================================================================
-namespace { struct JoltQCtx { ModelSubst* model; int ns; }; }
+namespace { struct JointQCtx { ModelSubst* model; int ns; }; }
 extern "C" void gpu_qdecompose_intree(void* vctx, const double* q, double* eval, double* U, double* Uinv) {
-    JoltQCtx* c = reinterpret_cast<JoltQCtx*>(vctx);
+    JointQCtx* c = reinterpret_cast<JointQCtx*>(vctx);
     c->model->gpuSetFreeParamsDecompose(q);
     int ns = c->ns;
     memcpy(eval, c->model->getEigenvalues(),         sizeof(double) * ns);
@@ -2040,7 +2040,7 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
     // decompose callback binds to, and the output Q buffer. All empty/no-op for fixed-Q (nFreeQ==0).
     vector<double> q0vec(nFreeQ > 0 ? nFreeQ : 0), outQ(nFreeQ > 0 ? nFreeQ : 0);
     if (nFreeQ > 0) model->gpuGetFreeParams(q0vec.data());
-    JoltQCtx qctx{ model, ns };
+    JointQCtx qctx{ model, ns };
 
     // --gpu-joint-diag: time the once-per-call host rebuild (DFS reindex + O(ntax*nptn) tip[] recompaction + flat arrays)
     double _jd_h1_t0 = params->gpu_joint_diag ? getRealTime() : 0.0;
@@ -2120,7 +2120,7 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
     vector<double> outBrlen(nNodes, 0.0); double outAlpha = alpha0; double outPinv = pinv0; int outIters = 0;
     vector<double> outRates(freeRateOK ? ncat : 0), outProps(freeRateOK ? ncat : 0);   // +R optimised rates/weights (writeback below)
     double _jd_dev_t0 = params->gpu_joint_diag ? getRealTime() : 0.0;   // --gpu-joint-diag: device-call wall start
-    double joltLnL = gpu_joint_optimize(ns, nptn, ncat, ntax, nNodes, /*root=*/nid[R],
+    double jointLnL = gpu_joint_optimize(ns, nptn, ncat, ntax, nNodes, /*root=*/nid[R],
         Uinv, UinvRowSum.data(), U, eval, catProp.data(), tip.data(), ptnFreq.data(),
         nodeNch.data(), nodeChild.data(), nodeLeaf.data(), nodeParentLen.data(),
         alpha0, optAlpha, /*maxiter=*/brlenMaxIter,
@@ -2134,7 +2134,7 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
         double jd_dev = getRealTime() - _jd_dev_t0;
         printf("GPU-JOINT-DIAG-HOST H1=%.6f device=%.6f iters=%d ntax=%d nptn=%d\n", jd_h1, jd_dev, outIters, ntax, nptn);
     }
-    if (std::isnan(joltLnL)) {
+    if (std::isnan(jointLnL)) {
         static bool warned = false;
         if (!warned) { warned = true; printf("[GPU-JOINT] gpu_joint_optimize returned NaN -> CPU fallback (optimizeParameters)\n"); }
         return (double)NAN;
@@ -2159,24 +2159,24 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
         // (rel<=1e-6) was validated on fitted ModelFinder trees, not on the intermediate far-from-optimum trees
         // this NNI loop feeds joint-optimiser; the lean tail dropped the full-tail rel<=1e-6 catch (see below) for a
         // finite-but-wrong device lnL. When set, recompute the CPU lnL at the written-back lengths and log rel
-        // without gating (still return joltLnL), so one search measures max(rel) over all intermediate-tree calls.
+        // without gating (still return jointLnL), so one search measures max(rel) over all intermediate-tree calls.
         if (getenv("IQTREE_GPU_AUDIT")) {
             double cpuLnL = computeLikelihood();   // fresh CPU postorder at the joint-optimiser-written lengths (partials just cleared)
-            double arel = (cpuLnL != 0.0) ? fabs((joltLnL - cpuLnL) / cpuLnL) : fabs(joltLnL - cpuLnL);
-            double aabs = fabs(joltLnL - cpuLnL);
+            double arel = (cpuLnL != 0.0) ? fabs((jointLnL - cpuLnL) / cpuLnL) : fabs(jointLnL - cpuLnL);
+            double aabs = fabs(jointLnL - cpuLnL);
             static int    audit_n = 0;
             static double audit_max_rel = 0.0, audit_max_abs = 0.0;
             audit_n++;
             if (arel > audit_max_rel) audit_max_rel = arel;
             if (aabs > audit_max_abs) audit_max_abs = aabs;
-            printf("[GPU-JOINT-AUDIT] call=%d joltLnL=%.6f cpuLnL=%.6f rel=%.3e abs=%.6f %s | run_max_rel=%.3e run_max_abs=%.6f\n",
-                   audit_n, joltLnL, cpuLnL, arel, aabs,
+            printf("[GPU-JOINT-AUDIT] call=%d jointLnL=%.6f cpuLnL=%.6f rel=%.3e abs=%.6f %s | run_max_rel=%.3e run_max_abs=%.6f\n",
+                   audit_n, jointLnL, cpuLnL, arel, aabs,
                    (arel <= 1e-6 ? "OK" : "DRIFT>1e-6"), audit_max_rel, audit_max_abs);
             fflush(stdout);
             clearAllPartialLH();   // computeLikelihood left partials VALID; restore the production dirty-set so state matches
         }
-        setCurScore(joltLnL);
-        return joltLnL;
+        setCurScore(jointLnL);
+        return jointLnL;
     }
     // ---- write Q + alpha + pinv back through the setters, then invalidate all partial-LH + transition caches ----
     // Set the model to the optimised free-Q deterministically (the launcher's internal Q updates leave the model
@@ -2193,19 +2193,19 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
 
     // ---- self-check: a fresh CPU computeLikelihood() must reproduce the joint-optimiser lnL (the load-bearing gate) ----
     double cpuLnL = computeLikelihood();
-    double rel = (cpuLnL != 0.0) ? fabs((joltLnL - cpuLnL) / cpuLnL) : fabs(joltLnL - cpuLnL);
+    double rel = (cpuLnL != 0.0) ? fabs((jointLnL - cpuLnL) / cpuLnL) : fabs(jointLnL - cpuLnL);
     static int report_count = 0;
     // Use model->getName() (includes the +F/+FO freq suffix) not model->name (matrix only), else the print drops
     // +F and mislabels LG+F+G4 as "LG+G4", making +F joint-optimiser-coverage uncountable.
-    string joltModelName = model->getName() + (ncat > 1 ? ((freeRateOK ? "+R" : "+G") + std::to_string(ncat)) : string(""));
+    string jointModelName = model->getName() + (ncat > 1 ? ((freeRateOK ? "+R" : "+G") + std::to_string(ncat)) : string(""));
     // The per-model GPU-vs-CPU validation line is diagnostic (fires once per candidate). Gate behind IQTREE_GPU_DEBUG
     // so a production --gpu-joint/--ctf run shows only the standard ModelFinder output + the joint-optimiser banner. The CPU
     // recompute + safety gate below are NOT gated - they are the load-bearing write-back coherence check that
     // falls back to CPU on a bad result.
     if (getenv("IQTREE_GPU_DEBUG") && report_count < 1000) { report_count++;
         printf("[GPU-JOINT] model=%s ns=%d ncat=%d: %d joint iters | GPU lnL=%.6f  CPU lnL=%.6f  rel=%.3e %s | alpha %.6f->%.6f | pinv %.6f->%.6f%s\n",
-               joltModelName.c_str(), ns, ncat, outIters,
-               joltLnL, cpuLnL, rel, (rel <= 1e-9 ? "PASS" : (rel <= 1e-6 ? "OK(gamma-resid)" : "MISMATCH")),
+               jointModelName.c_str(), ns, ncat, outIters,
+               jointLnL, cpuLnL, rel, (rel <= 1e-9 ? "PASS" : (rel <= 1e-6 ? "OK(gamma-resid)" : "MISMATCH")),
                alpha0, (ncat>1?site_rate->getGammaShape():0.0),
                pinv0, (optPinv?site_rate->getPInvar():0.0), (optPinv?" +I":"")); }
 
@@ -2217,7 +2217,7 @@ double PhyloTree::optimizeParametersGpuJoint(int fixed_len, bool brlenOnly, bool
                             // returns NaN before the setCurScore(cpuLnL) below could poison _cur_score
         static bool warned_mismatch = false;
         if (!warned_mismatch) { warned_mismatch = true;
-            printf("[GPU-JOINT] write-back MISMATCH rel=%.3e > 1e-6 -> CPU fallback (model=%s)\n", rel, joltModelName.c_str()); }
+            printf("[GPU-JOINT] write-back MISMATCH rel=%.3e > 1e-6 -> CPU fallback (model=%s)\n", rel, jointModelName.c_str()); }
         return (double)NAN;
     }
 
@@ -2474,18 +2474,18 @@ double PhyloTree::optimizeParametersGpuJointMix(int fixed_len) {
     double cpuLnL = computeLikelihood();
     double rel = (cpuLnL != 0.0) ? std::fabs((finalLnL - cpuLnL) / cpuLnL) : std::fabs(finalLnL - cpuLnL);
     static int report_count = 0;
-    string joltModelName = model->getName() + (optPinv || pinv0 > 0.0 ? string("+I") : string("")) + (ncat > 1 ? ("+G" + std::to_string(ncat)) : string(""));
+    string jointModelName = model->getName() + (optPinv || pinv0 > 0.0 ? string("+I") : string("")) + (ncat > 1 ? ("+G" + std::to_string(ncat)) : string(""));
     // diagnostic - gate behind IQTREE_GPU_DEBUG (the CPU recompute + safety gate below stay)
     if (getenv("IQTREE_GPU_DEBUG") && report_count < 1000) { report_count++;
         printf("[GPU-JOINT-MIX] model=%s N=%d ns=%d ncat=%d weights=%s: %d iters | GPU lnL=%.6f  CPU lnL=%.6f  rel=%.3e %s | alpha %.6f->%.6f | pinv %.6f->%.6f%s\n",
-               joltModelName.c_str(), N, ns, ncat, (optWeights ? "EM" : "fixed"), outIters, finalLnL, cpuLnL, rel,
+               jointModelName.c_str(), N, ns, ncat, (optWeights ? "EM" : "fixed"), outIters, finalLnL, cpuLnL, rel,
                (rel <= 1e-6 ? "OK" : "MISMATCH"), alpha0, (ncat > 1 ? site_rate->getGammaShape() : 0.0),
                pinv0, (optPinv ? site_rate->getPInvar() : pinv0), (optPinv ? " +I" : "")); }
 
     if (!(rel <= 1e-6)) {   // NOT(<=) so a NaN/inf rel also trips the fallback before setCurScore poisons _cur_score
         static bool warned_mm = false;
         if (!warned_mm) { warned_mm = true;
-            printf("[GPU-JOINT-MIX] write-back MISMATCH rel=%.3e > 1e-6 -> CPU fallback (model=%s)\n", rel, joltModelName.c_str()); }
+            printf("[GPU-JOINT-MIX] write-back MISMATCH rel=%.3e > 1e-6 -> CPU fallback (model=%s)\n", rel, jointModelName.c_str()); }
         return (double)NAN;
     }
     setCurScore(cpuLnL);

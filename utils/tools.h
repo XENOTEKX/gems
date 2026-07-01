@@ -2945,7 +2945,8 @@ public:
     int ctf_seed;
 
     /**
-     *  TRUE to force the CPU path in a GPU-enabled (IQTREE_GPU=ON) build (set by --no-jolt / --cpu).
+     *  TRUE to force the CPU path in a GPU-enabled (IQTREE_GPU=ON) build (set by --no-gpu-joint / --cpu;
+     *  --no-jolt is a deprecated alias).
      *  In the GPU build, GPU/joint-optimiser is default-ON unless this is set; lets the GPU binary run the
      *  CPU path for A/B parity. No effect in the CPU-only build. Default false.
      */
