@@ -26,7 +26,7 @@ extern "C" {
    @param U    out: ns*ns eigenvectors (row-major)
    @param Uinv out: ns*ns inverse eigenvectors (row-major)
  */
-typedef void (*jolt_qdecompose_fn)(void* ctx, const double* q, double* eval, double* U, double* Uinv);
+typedef void (*gpu_qdecompose_fn)(void* ctx, const double* q, double* eval, double* U, double* Uinv);
 
 /**
    Toolchain diagnostic. Enumerates the CUDA device(s), prints device name /
@@ -295,7 +295,7 @@ double gpu_allbranch_derv_crosscheck_mix(
 void gpu_discrete_gamma_mean(double alpha, int K, double* rates);
 
 /**
-   JOLT joint-gradient optimiser launcher. A single joint LM diagonal-Newton loop
+   GPU joint-gradient optimiser launcher. A single joint LM diagonal-Newton loop
    steps ALL branches AND (if optAlpha) the gamma shape alpha at once, replacing
    IQ-TREE's per-edge Gauss-Seidel optimizeAllBranches + alpha-Brent. The whole
    host control loop and the device kernels (k1_node postorder, kj_pre preorder
@@ -314,7 +314,7 @@ void gpu_discrete_gamma_mean(double alpha, int K, double* rates);
    Eligibility (gated by the caller): NORM_LH / unscaled, FP64, ns in {4,20}.
    @return optimised lnL, or NaN on any CUDA error (caller falls back to CPU).
  */
-double gpu_jolt_optimize(
+double gpu_joint_optimize(
     int nstates, int nptn, int ncat, int ntax, int nnodes, int root,
     const double* Uinv,          // nstates*nstates (inverse eigenvectors)
     const double* UinvRowSum,    // nstates (row sums, for ambiguous tips)
@@ -341,7 +341,7 @@ double gpu_jolt_optimize(
     // be active (GTR+R): independent diagonal-LM axes (free-Q FD gradient orthogonal to the log-rate/weight arms).
     int nFreeQ,                  // number of free exchangeabilities (0 = fixed-Q; 1..5 for DNA HKY..GTR)
     const double* q0,            // nFreeQ initial free params (nullptr if nFreeQ==0)
-    jolt_qdecompose_fn qdecompose, void* qctx,   // ctx-bound host callback: q[nFreeQ] -> eval[ns],U[ns*ns],Uinv[ns*ns]
+    gpu_qdecompose_fn qdecompose, void* qctx,   // ctx-bound host callback: q[nFreeQ] -> eval[ns],U[ns*ns],Uinv[ns*ns]
     double* out_q,               // nFreeQ (out: optimised free params; untouched if nFreeQ==0)
     double* out_brlen,           // nnodes (out: optimised parentLen per node; root entry untouched)
     double* out_alpha,           // out: optimised alpha (unchanged if !optAlpha)

@@ -2114,7 +2114,7 @@ public:
 
     /** GPU JOLT joint-gradient optimiser entry for ONE candidate model. Replaces IQ-TREE's
         per-edge Gauss-Seidel optimizeAllBranches + alpha-Brent with a single joint LM diagonal-Newton loop over
-        (all branches + gamma alpha), run on the GPU (gpu_jolt_optimize). Builds the reference inputs from the
+        (all branches + gamma alpha), run on the GPU (gpu_joint_optimize). Builds the reference inputs from the
         LIVE model/site_rate/tree/alignment, runs the optimiser, writes the optimised branch lengths + alpha back
         through the cache-invalidating setters (setGammaShape + clearAllPartialLH), and self-checks that a fresh
         CPU computeLikelihood() reproduces the JOLT lnL (rel <= 1e-9). Returns the optimised lnL, or NaN if the

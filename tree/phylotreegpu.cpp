@@ -38,7 +38,7 @@
 using namespace std;
 
 // Process-wide lock for optimizeParametersJOLTMix. The mixture reference launchers (gpu_lnl_crosscheck_mix and
-// the all-branch-derivative launcher) are not internally mutexed (unlike gpu_jolt_optimize, which holds its own
+// the all-branch-derivative launcher) are not internally mutexed (unlike gpu_joint_optimize, which holds its own
 // lock), and ModelFinder scores candidate models OpenMP-parallel across models. Without this, concurrent JOLTMix
 // calls would race the single GPU's constant memory, so JOLTMix serializes on the one GPU; ineligible candidates
 // still run N-parallel on the CPU.
@@ -1903,12 +1903,12 @@ void PhyloTree::setLikelihoodKernelGPU() {
 }
 
 // ============================================================================================================
-// Host callback handed to gpu_jolt_optimize for DNA free-Q models (the eigensystem moves during the optimise).
+// Host callback handed to gpu_joint_optimize for DNA free-Q models (the eigensystem moves during the optimise).
 // Applies a trial free-Q vector q[nFreeQ] to the live model (gpuSetFreeParamsDecompose -> param_spec rate-class
 // mapping + the G-T=1 gauge + decomposeRateMatrix), then copies the fresh eigensystem back to the launcher's host
-// buffers. extern "C" to match the jolt_qdecompose_fn C ABI. ctx = the model + ns. The launcher is mutex-
+// buffers. extern "C" to match the gpu_qdecompose_fn C ABI. ctx = the model + ns. The launcher is mutex-
 // serialized and the model is thread-local, so this mutates only the calling thread's own model; the final
-// optimised Q is written back deterministically after gpu_jolt_optimize returns (do not rely on the launcher's
+// optimised Q is written back deterministically after gpu_joint_optimize returns (do not rely on the launcher's
 // internal Q updates leaving the model in any particular state).
 // ============================================================================================================
 namespace { struct JoltQCtx { ModelSubst* model; int ns; }; }
@@ -2120,7 +2120,7 @@ double PhyloTree::optimizeParametersJOLT(int fixed_len, bool brlenOnly, bool lea
     vector<double> outBrlen(nNodes, 0.0); double outAlpha = alpha0; double outPinv = pinv0; int outIters = 0;
     vector<double> outRates(freeRateOK ? ncat : 0), outProps(freeRateOK ? ncat : 0);   // +R optimised rates/weights (writeback below)
     double _jd_dev_t0 = params->jolt_diag ? getRealTime() : 0.0;   // --jolt-diag: device-call wall start
-    double joltLnL = gpu_jolt_optimize(ns, nptn, ncat, ntax, nNodes, /*root=*/nid[R],
+    double joltLnL = gpu_joint_optimize(ns, nptn, ncat, ntax, nNodes, /*root=*/nid[R],
         Uinv, UinvRowSum.data(), U, eval, catProp.data(), tip.data(), ptnFreq.data(),
         nodeNch.data(), nodeChild.data(), nodeLeaf.data(), nodeParentLen.data(),
         alpha0, optAlpha, /*maxiter=*/brlenMaxIter,
@@ -2136,7 +2136,7 @@ double PhyloTree::optimizeParametersJOLT(int fixed_len, bool brlenOnly, bool lea
     }
     if (std::isnan(joltLnL)) {
         static bool warned = false;
-        if (!warned) { warned = true; printf("[JOLT] gpu_jolt_optimize returned NaN -> CPU fallback (optimizeParameters)\n"); }
+        if (!warned) { warned = true; printf("[JOLT] gpu_joint_optimize returned NaN -> CPU fallback (optimizeParameters)\n"); }
         return (double)NAN;
     }
 
@@ -2239,7 +2239,7 @@ double PhyloTree::optimizeAllBranchesJOLT(int maxiter) {
     static const int env = []{ const char* e = getenv("JOLT_BRLEN_MAXITER"); return e ? atoi(e) : 0; }();
     if (env < 0) return (double)NAN;   // JOLT_BRLEN_MAXITER<0 => skip the GPU reopt entirely => CPU
                                        // optimizeAllBranches(1) fallback => the GPU timeline is pure screener (no
-                                       // kj_pre/k1_node from gpu_jolt_optimize colliding with the screener kernels).
+                                       // kj_pre/k1_node from gpu_joint_optimize colliding with the screener kernels).
                                        // unset => env=0 => this branch never taken => byte-identical production.
     if (env > 0) maxiter = env;
     return optimizeParametersJOLT(BRLEN_OPTIMIZE, /*brlenOnly=*/true, /*leanTail=*/true, /*brlenMaxIter=*/maxiter);

@@ -1,6 +1,6 @@
-// gpu_joint_optimizer.cu — JOLT joint-gradient model optimiser (GPU launcher).
+// gpu_joint_optimizer.cu — GPU joint-gradient model optimiser (launcher).
 //
-// One entry point (gpu_jolt_optimize) optimises every continuous parameter of a
+// One entry point (gpu_joint_optimize) optimises every continuous parameter of a
 // model on one fixed topology — branch lengths, Gamma alpha, p-inv, +R
 // rates/weights, and free-Q exchangeabilities — in a joint Levenberg-Marquardt
 // loop, evaluating the likelihood and its full gradient on the GPU each step.
@@ -22,7 +22,7 @@
 #include <mutex>        // serialize GPU access — ModelFinder is across-model OpenMP-parallel
 #include <chrono>       // host-side timer for the per-eval echild rebuild (--jolt-diag)
 
-// =============================== JOLT private kernels ===============================
+// =============================== joint-optimiser private kernels ===============================
 // kj_derv_fused: compute theta = node*dad in registers (never materialised to a
 // d_theta arena), then emit patlh/pdf/pddf AND (if rnum!=null) accumulate the
 // per-category rate-gradient numerator (rnum[c] += g_rscale[c]*sum_x g_val1[c,x]*theta)
@@ -99,10 +99,10 @@ __global__ void kj_reduce_gradnum(int nptn, int ncat, const double* __restrict__
     }
 }
 
-// =============================== JOLT joint-gradient optimiser launcher ===============================
+// =============================== joint-gradient optimiser launcher ===============================
 // Mean-rate discrete-Gamma (Yang 1994; IQ-TREE's "mean of the portion"):
 // r_c = K*[P(alpha+1, alpha*b_c) - P(alpha+1, alpha*b_{c-1})].
-static double jolt_gammp_reg(double a, double x){   // regularized lower incomplete gamma P(a,x) (gser/gcf)
+static double gamma_p_reg(double a, double x){   // regularized lower incomplete gamma P(a,x) (gser/gcf)
     if (x<=0.0) return 0.0; double gln=lgamma(a);
     if (x<a+1.0){ double ap=a,sum=1.0/a,del=sum; for(int n=1;n<=300;n++){ ap+=1.0; del*=x/ap; sum+=del; if(fabs(del)<fabs(sum)*1e-16) break; }
         return sum*exp(-x+a*log(x)-gln); }
@@ -110,26 +110,26 @@ static double jolt_gammp_reg(double a, double x){   // regularized lower incompl
     for(int i=1;i<=300;i++){ double an=-(double)i*((double)i-a); b+=2.0; d=an*d+b; if(fabs(d)<1e-300)d=1e-300; c=b+an/c; if(fabs(c)<1e-300)c=1e-300; d=1.0/d; double del=d*c; h*=del; if(fabs(del-1.0)<1e-16) break; }
     return 1.0-exp(-x+a*log(x)-gln)*h;
 }
-static double jolt_gammp_inv(double a, double p){    // inverse: x s.t. P(a,x)=p, by bracketed bisection
+static double gamma_p_inv(double a, double p){    // inverse: x s.t. P(a,x)=p, by bracketed bisection
     if (p<=0.0) return 0.0; if (p>=1.0) return 1e300;
-    double lo=0.0,hi=a+10.0*sqrt(a+1.0)+20.0; int guard=0; while(jolt_gammp_reg(a,hi)<p && guard++<200) hi*=2.0;
-    for(int it=0;it<200;it++){ double mid=0.5*(lo+hi); if(jolt_gammp_reg(a,mid)<p) lo=mid; else hi=mid; if(hi-lo<1e-13*(mid+1e-13)) break; }
+    double lo=0.0,hi=a+10.0*sqrt(a+1.0)+20.0; int guard=0; while(gamma_p_reg(a,hi)<p && guard++<200) hi*=2.0;
+    for(int it=0;it<200;it++){ double mid=0.5*(lo+hi); if(gamma_p_reg(a,mid)<p) lo=mid; else hi=mid; if(hi-lo<1e-13*(mid+1e-13)) break; }
     return 0.5*(lo+hi);
 }
-static void jolt_discreteGammaMean(double alpha, int K, double* rates){
+static void discrete_gamma_mean_rates(double alpha, int K, double* rates){
     if (K==1){ rates[0]=1.0; return; }
     double prev=0.0;
     for(int c=0;c<K;c++){ double hi;
         if(c==K-1) hi=1.0;
-        else { double bc=jolt_gammp_inv(alpha,(double)(c+1)/(double)K)/alpha; hi=jolt_gammp_reg(alpha+1.0, alpha*bc); }
+        else { double bc=gamma_p_inv(alpha,(double)(c+1)/(double)K)/alpha; hi=gamma_p_reg(alpha+1.0, alpha*bc); }
         rates[c]=(double)K*(hi-prev); prev=hi; }
 }
 // Host shim so the mixture joint-optimiser's alpha override can recompute mean-1
 // discrete-gamma rates at an iterate alpha, matching the live RateGamma mean-rate
 // (GAMMA_CUT_MEAN) path.
-extern "C" void gpu_discrete_gamma_mean(double alpha, int K, double* rates){ jolt_discreteGammaMean(alpha, K, rates); }
+extern "C" void gpu_discrete_gamma_mean(double alpha, int K, double* rates){ discrete_gamma_mean_rates(alpha, K, rates); }
 
-// JOLT persistent device buffers (separate from the lnL/derv pools; same alloc-once / reuse policy).
+// Joint-optimiser persistent device buffers (separate from the lnL/derv pools; same alloc-once / reuse policy).
 static DevBuf gbj_echild, gbj_partial, gbj_patlh, gbj_pdf, gbj_pddf,
               gbj_pretmp, gbj_tipeig, gbj_prepool, gbj_expfac, gbj_rnum, gbj_tip, gbj_baseinvar,
               gbj_ptnfreq, gbj_redpart,   // on-device ptn_freq + per-block reduction partials
@@ -138,12 +138,12 @@ static DevBuf gbj_echild, gbj_partial, gbj_patlh, gbj_pdf, gbj_pddf,
 
 // --jolt-diag: per-eval host echild-rebuild cost (host loop + 2 blocking H2D in rebuildEchild). Gated by env
 // JOLT_DIAG (set by --jolt-diag; the CUDA TU cannot see Params). Accumulated across the LM loop; reported per call.
-static bool   g_jdiag_init = false;
-static bool   g_jdiag = false;
-static double g_jd_echild_sec = 0.0;
-static long   g_jd_echild_n = 0;
+static bool   g_gpujoint_diag_init = false;
+static bool   g_gpujoint_diag = false;
+static double g_gpujoint_echild_sec = 0.0;
+static long   g_gpujoint_echild_n = 0;
 
-extern "C" double gpu_jolt_optimize(
+extern "C" double gpu_joint_optimize(
     int nstates, int nptn, int ncat, int ntax, int nnodes, int root,
     const double* Uinv, const double* UinvRowSum, const double* U, const double* eval,
     const double* catProp, const unsigned char* tip, const double* ptn_freq,
@@ -151,25 +151,25 @@ extern "C" double gpu_jolt_optimize(
     double alpha0, int optAlpha, int maxiter,
     const double* base_invar, double pinv0, int optPinv, double pinvMin, double pinvMax,
     const double* catRate0, int freeRate,   // +R FreeRate — catRate0=rates[c] (else nullptr); freeRate=1 seeds rates directly (no alpha)
-    int nFreeQ, const double* q0, jolt_qdecompose_fn qdecompose, void* qctx, double* out_q,   // DNA free-Q (eigensystem moves)
+    int nFreeQ, const double* q0, gpu_qdecompose_fn qdecompose, void* qctx, double* out_q,   // DNA free-Q (eigensystem moves)
     double* out_brlen, double* out_alpha, double* out_pinv, int* out_iters,
     double* out_rates, double* out_props)   // +R optimised rates/weights (nullptr unless freeRate==1)
 {
     int ns = nstates;
-    if (ns > NS_MAX || ncat > 64) { fprintf(stderr,"[JOLT] unsupported ns=%d ncat=%d\n",ns,ncat); return (double)NAN; }
+    if (ns > NS_MAX || ncat > 64) { fprintf(stderr,"[GPU-JOINT] unsupported ns=%d ncat=%d\n",ns,ncat); return (double)NAN; }
 
     // ModelFinder evaluates candidates across-model in parallel, so this launcher
     // can be entered by many threads at once. The single GPU's __constant__ symbols
     // (g_Uinv/g_U/g_val*/g_rscale) and the static DevBuf pool (gbj_*) are
     // process-global device state, so concurrent use would clobber. Serialize the
-    // whole GPU computation: JOLT models run one at a time on the GPU while other
+    // whole GPU computation: joint-optimiser models run one at a time on the GPU while other
     // threads keep optimising CPU-fallback candidates.
     static std::mutex jolt_gpu_mtx;
     std::lock_guard<std::mutex> jolt_lock(jolt_gpu_mtx);
     // --jolt-diag: init the gate + snapshot the per-call echild baseline inside the lock, so the across-model
-    // OpenMP concurrency can't tear the baseline read or race g_jdiag_init.
-    if (!g_jdiag_init) { g_jdiag = (std::getenv("JOLT_DIAG") != nullptr); g_jdiag_init = true; }
-    double _jd_ech0 = g_jd_echild_sec; long _jd_echn0 = g_jd_echild_n;
+    // OpenMP concurrency can't tear the baseline read or race g_gpujoint_diag_init.
+    if (!g_gpujoint_diag_init) { g_gpujoint_diag = (std::getenv("JOLT_DIAG") != nullptr); g_gpujoint_diag_init = true; }
+    double _gj_ech0 = g_gpujoint_echild_sec; long _gj_echn0 = g_gpujoint_echild_n;
     // Reopt proof-counters (JOLT_DEBUG): per-call tally of reopt coefficient uploads. Function-local (reset per
     // call); guarded by the GPU mutex above.
     long ts_reopt_mcs = 0;   // cudaMemcpyToSymbol count (g_val0/1/2 + g_rscale per edge)
@@ -191,7 +191,7 @@ extern "C" double gpu_jolt_optimize(
     auto qApply = [&](const double* q) -> void {   // re-decompose for a trial Q and re-upload eval/U/Uinv; rebuildEchild()/setVal() then use the new evalP/UP
         // Plain cudaMemcpyToSymbol (not GCK): GCK's `return (double)NAN` would return from this void lambda,
         // swallowing the error. Any failure is caught by the final cudaGetLastError() backstop (the sticky
-        // last-error persists to the end of gpu_jolt_optimize -> NaN -> CPU).
+        // last-error persists to the end of gpu_joint_optimize -> NaN -> CPU).
         qdecompose(qctx, q, evalB.data(), UB.data(), UinvB.data());
         cudaMemcpyToSymbol(g_Uinv, UinvB.data(), sizeof(double)*ns*ns);
         cudaMemcpyToSymbol(g_U,    UB.data(),    sizeof(double)*ns*ns);
@@ -208,7 +208,7 @@ extern "C" double gpu_jolt_optimize(
     std::vector<int> postorder; std::vector<int> slot(nnodes,-1);
     std::function<void(int)> dfs=[&](int u){ for(int c:child[u]) dfs(c); if(leaf[u]<0){ slot[u]=(int)postorder.size(); postorder.push_back(u);} };
     dfs(root); int nInternal=(int)postorder.size();
-    int c0=-1; for(int c:child[root]) if(leaf[c]<0){ c0=c; break; } if(c0<0){ fprintf(stderr,"[JOLT] no internal root child\n"); return (double)NAN; }
+    int c0=-1; for(int c:child[root]) if(leaf[c]<0){ c0=c; break; } if(c0<0){ fprintf(stderr,"[GPU-JOINT] no internal root child\n"); return (double)NAN; }
     std::vector<int> edgeV; for(int u=0;u<nnodes;u++) for(int v:child[u]) edgeV.push_back(v); int nedge=(int)edgeV.size();
     int treeH=0; std::function<void(int,int)> ddfs=[&](int u,int d){ if(d>treeH)treeH=d; for(int c:child[u]) ddfs(c,d+1); }; ddfs(root,0); int nPool=treeH+2;
 
@@ -216,7 +216,7 @@ extern "C" double gpu_jolt_optimize(
     int TB=256;
 
     // ===== PATTERN TILING — fit the O(nptn) partial arenas on smaller GPUs =====
-    // Every JOLT quantity (lnL, df_e, ddf_e, gradR_c) is a sum over patterns, so partitioning the nptn patterns into
+    // Every joint-optimiser quantity (lnL, df_e, ddf_e, gradR_c) is a sum over patterns, so partitioning the nptn patterns into
     // nTile contiguous chunks, running a full postorder+preorder sweep per chunk, and Kahan-accumulating each chunk's
     // contribution reproduces the one-shot result to rel<=1e-12 (the same additivity that underlies the ptn_freq-
     // weighted reductions). Every O(nptn) device arena (the dominant postorder gbj_partial, the preorder pool,
@@ -242,7 +242,7 @@ extern "C" double gpu_jolt_optimize(
     if (freeRate) nTile = 1;   // +R (freeRate 1 and 2) runs on full-nptn buffers; no pattern tiling
     if (getenv("JOLT_DEBUG")) {
         size_t fB=0,tB=0; cudaMemGetInfo(&fB,&tB);
-        fprintf(stderr,"[JOLT-TILE] nptn=%d ns=%d ncat=%d nInternal=%d nPool=%d -> nTile=%d (chunk~%d ptn); freeVRAM=%.1f GB\n",
+        fprintf(stderr,"[GPU-JOINT-TILE] nptn=%d ns=%d ncat=%d nInternal=%d nPool=%d -> nTile=%d (chunk~%d ptn); freeVRAM=%.1f GB\n",
                 nptn,ns,ncat,nInternal,nPool,nTile,(nptn+nTile-1)/nTile,(double)fB/1073741824.0); fflush(stderr);
     }
 
@@ -303,7 +303,7 @@ extern "C" double gpu_jolt_optimize(
     std::vector<double> catRate(ncat,1.0), catProp_v(catProp, catProp+ncat);
     std::vector<double> meanR(ncat,1.0);   // mean-1 discrete-gamma rates (alpha-dependent only)
     double curAlpha=alpha0;
-    auto applyAlpha=[&](double a){ jolt_discreteGammaMean(a,ncat,meanR.data()); };  // -> meanR (mean 1)
+    auto applyAlpha=[&](double a){ discrete_gamma_mean_rates(a,ncat,meanR.data()); };  // -> meanR (mean 1)
     if (ncat>1 && !freeRate) applyAlpha(curAlpha);   // +R seeds rates directly (below), not from alpha
     // +I: IQ-TREE's RateGammaInvar uses getProp(c)=(1-pinv)/K and rescales the gamma rates to meanR[c]/(1-pinv), so
     // the overall mean rate including invariant sites at rate 0 stays 1. Both the rate (up by 1/(1-pinv)) and the
@@ -329,14 +329,14 @@ extern "C" double gpu_jolt_optimize(
         ec=d_echild+(size_t)w*ecStride; sp=nullptr; st=nullptr;
         if(leaf[w]>=0) st=d_tip+(size_t)leaf[w]*Pn; else sp=d_partial+(size_t)slot[w]*slotSz; };
     auto rebuildEchild=[&](){
-        std::chrono::steady_clock::time_point _jd_e0; if(g_jdiag) _jd_e0 = std::chrono::steady_clock::now();   // --jolt-diag timer
+        std::chrono::steady_clock::time_point _gj_e0; if(g_gpujoint_diag) _gj_e0 = std::chrono::steady_clock::now();   // --jolt-diag timer
         for(int c=0;c<nnodes;c++){ if(c==root){ for(size_t z=0;z<ecStride;z++) h_echild[(size_t)c*ecStride+z]=0.0; continue; }
             for(int cat=0;cat<ncat;cat++){ double len=brlen[c]*catRate[cat]; double ex[NS_MAX]; for(int i=0;i<ns;i++) ex[i]=exp(evalP[i]*len);
                 double* e=&h_echild[(size_t)c*ecStride+(size_t)cat*ns*ns]; for(int x=0;x<ns;x++) for(int i=0;i<ns;i++) e[x*ns+i]=UP[x*ns+i]*ex[i];
                 for(int i=0;i<ns;i++) h_expfac[(size_t)c*ncat*ns+cat*ns+i]=ex[i]; } }
         cudaMemcpy(d_echild,h_echild.data(),(size_t)nnodes*ecStride*sizeof(double),cudaMemcpyHostToDevice);
         cudaMemcpy(d_expfac,h_expfac.data(),(size_t)nnodes*ncat*ns*sizeof(double),cudaMemcpyHostToDevice);
-        if(g_jdiag){ g_jd_echild_sec += std::chrono::duration<double>(std::chrono::steady_clock::now()-_jd_e0).count(); g_jd_echild_n++; } };   // --jolt-diag: echild cost
+        if(g_gpujoint_diag){ g_gpujoint_echild_sec += std::chrono::duration<double>(std::chrono::steady_clock::now()-_gj_e0).count(); g_gpujoint_echild_n++; } };   // --jolt-diag: echild cost
     auto postorderFill=[&](){
         for(int idx=0; idx<nInternal; idx++){ int u=postorder[idx]; if(u==root) continue;
             int nch; const double* ec[3]; const double* p[3]; const unsigned char* t[3]; childArgs(u,-1,nch,ec,p,t);
@@ -532,7 +532,7 @@ extern "C" double gpu_jolt_optimize(
         double ga=0;
         // alpha gradient: ga = sum_c (d catRate[c]/dalpha)*gradR[c]; catRate[c]=meanR[c]/f, so the perturbed mean-1
         // rate rp[c] must be scaled by 1/f too (else mixing scaled/unscaled rates gives the wrong alpha grad on +I).
-        if(ncat>1 && !freeRate){ double f = optPinv ? (1.0-curPinv) : 1.0; double rp[64]; jolt_discreteGammaMean(curAlpha+1e-5,ncat,rp);
+        if(ncat>1 && !freeRate){ double f = optPinv ? (1.0-curPinv) : 1.0; double rp[64]; discrete_gamma_mean_rates(curAlpha+1e-5,ncat,rp);
             for(int c=0;c<ncat;c++) ga+=((rp[c]/f-catRate[c])/1e-5)*gradR[c]; }   // no alpha for +R (rates are free params, not gamma-derived)
         lnLout=Lacc; galphaOut=ga; };
 
@@ -659,7 +659,7 @@ extern "C" double gpu_jolt_optimize(
     if(freeRate==1 && out_rates && out_props) for(int c=0;c<ncat;c++){ out_rates[c]=catRate[c]; out_props[c]=catProp_v[c]; }   // optimised +R rates/weights
     if(out_iters) *out_iters=it;
     // --jolt-diag: nRej = rejected backtracks (each a discarded full postorder), nLnLEval = total evalLnL postorders.
-    if(g_jdiag) printf("JOLT-DIAG-CU echild=%.6f n=%ld iters=%d nRej=%d nLnLEval=%ld nptn=%d\n", g_jd_echild_sec-_jd_ech0, g_jd_echild_n-_jd_echn0, it, nRej, nLnLEval, nptn);
+    if(g_gpujoint_diag) printf("GPU-JOINT-DIAG-CU echild=%.6f n=%ld iters=%d nRej=%d nLnLEval=%ld nptn=%d\n", g_gpujoint_echild_sec-_gj_ech0, g_gpujoint_echild_n-_gj_echn0, it, nRej, nLnLEval, nptn);
     (void)ts_reopt_mcs; (void)ts_reopt_vp;
     return lnL;
 }

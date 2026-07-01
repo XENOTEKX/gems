@@ -3018,7 +3018,7 @@ public:
     double ts_adaptive_delta;
 
     /** Replace the post-NNI CPU optimizeAllBranches(1) with a lean in-loop JOLT all-branch reopt (GPU build;
-        optimizeAllBranchesJOLT -> brlen-only gpu_jolt_optimize, lean tail: no clearAllPartialLH or CPU
+        optimizeAllBranchesJOLT -> brlen-only gpu_joint_optimize, lean tail: no clearAllPartialLH or CPU
         self-check). NaN -> CPU fallback. Not bit-exact (JOLT converges harder than a single CPU sweep), so
         it is gated on quality, not byte-identity. Off by default. */
     bool ts_jolt_allbr;
