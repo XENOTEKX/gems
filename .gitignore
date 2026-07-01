@@ -35,3 +35,7 @@ zlib-1.2.7/
 /.direnv/
 /.envrc
 softwipe_build
+
+# PBS job stdout/stderr from Gadi verification runs (p1e/p1f), left in the tree
+gems_p1*.o*
+gems_p1*.e*
