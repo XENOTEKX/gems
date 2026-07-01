@@ -3625,8 +3625,8 @@ void runTreeReconstruction(Params &params, IQTree* &iqtree) {
         // Honour the cgroup/PBS memory allocation, not just physical RAM: on a shared node
         // (e.g. a 2 TB GPU node with a 180 GB job) getMemorySize() reports the physical 2 TB, so the
         // auto-mem-save below would never trigger and IQ-TREE would over-allocate the O(nInternal*nptn)
-        // partial-lh arena and get cgroup-killed (the AA-10M --jolt OOM, job 170856902). Size to the
-        // real allocation so the existing, tested LM_MEM_SAVE path engages correctly.
+        // partial-lh arena and be cgroup-killed on a large alignment. Size to the real allocation so
+        // the existing, tested LM_MEM_SAVE path engages correctly.
         uint64_t phys_mem  = getMemorySize();
         uint64_t total_mem = getAvailableMemory();           // min(physical, cgroup/job limit)
         if (total_mem < phys_mem)

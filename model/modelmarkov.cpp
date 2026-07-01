@@ -1015,7 +1015,7 @@ void ModelMarkov::scaleStateFreq(bool sum_one) {
 	}
 }
 
-// G.6 (GPU free-Q JOLT) — thin public wrappers over the protected (set/get)Variables. They go through the
+// GPU free-Q JOLT — thin public wrappers over the protected (set/get)Variables. They go through the
 // VIRTUAL (set/get)Variables, so ModelDNA's param_spec rate-class mapping + gauge (G-T=1) are applied
 // automatically: one code path covers HKY..GTR and every equal/empirical-freq variant. The flat vector is
 // 0-indexed of length getNDim() (the optimiser's free dims); for fixed-freq models that is exactly the free

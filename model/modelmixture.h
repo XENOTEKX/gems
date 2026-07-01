@@ -122,7 +122,7 @@ public:
 	 */
 	virtual void setFixMixtureWeight(bool fix_prop) { this->fix_prop = fix_prop; }
 
-	/** G.8.2.4: are the mixture class weights FIXED (published, e.g. C20/C60) vs estimated by ML?
+	/** Are the mixture class weights FIXED (published, e.g. C20/C60) vs estimated by ML?
 	    Used by the GPU JOLT mixture optimiser to decide whether to run the EM weight block. */
 	bool isFixMixtureWeight() const { return fix_prop; }
 

@@ -4401,7 +4401,7 @@ void IQTree::evaluateNNIs(Branches &nniBranches, vector<NNIMove>  &positiveNNIs)
 // On screener ineligibility/CUDA error -> pure CPU evaluateNNIs (byte-identical). evaluateNNIs is left untouched
 // (it is also called for nonNNIBranches and from other paths); the dispatch is only at the main optimizeNNI site.
 void IQTree::evaluateNNIsScreened(Branches &nniBranches, vector<NNIMove> &positiveNNIs) {
-    // ROOT-CAUSE FIX (ground-truth 172201742): the GPU screener roots its own DFS at root->neighbors[0]->node,
+    // Root-cause fix: the GPU screener roots its own DFS at root->neighbors[0]->node,
     // but getBestNNIForBran orients node1 via the `direction` field -- which is STALE relative to the current root
     // (setRootNode does not recompute it for unrooted trees), so the two rootings are INVERTED for ~all branches and
     // the upper-folding move reconstructs the mirror rearrangement. Re-rooting `direction` at the current root makes

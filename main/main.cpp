@@ -2292,7 +2292,7 @@ int main(int argc, char *argv[]) {
     }
 #endif
 
-    // --- GPU diagnostic hook (Phase G.1.0, opt-in) ---------------------------
+    // --- GPU diagnostic hook (opt-in) ---------------------------
     // The verbose build-scaffold self-test (hello-world kernel + device dump) now runs ONLY
     // when IQTREE_GPU_DIAG is set in the environment, so production runs stay clean (the GPU
     // device line is printed in the startup banner instead). A CPU-only build still warns if
