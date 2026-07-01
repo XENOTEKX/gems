@@ -953,7 +953,10 @@ if (IQTREE_GPU)
     find_package(CUDAToolkit REQUIRED)   # provides the CUDA::cudart imported target
     message("CUDA compiler : ${CMAKE_CUDA_COMPILER}")
     message("CUDA arch     : ${CMAKE_CUDA_ARCHITECTURES}")
-    add_library(iqtree_gpu STATIC tree/gpu/gpu_diag.cu tree/gpu/gpu_lnl_intree.cu)
+    add_library(iqtree_gpu STATIC
+        tree/gpu/gpu_diag.cu
+        tree/gpu/gpu_lnl_intree.cu
+        tree/gpu/gpu_parsimony.cu)
     set_target_properties(iqtree_gpu PROPERTIES
         CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
         POSITION_INDEPENDENT_CODE ON
