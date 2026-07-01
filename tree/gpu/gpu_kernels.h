@@ -20,6 +20,11 @@ __global__ void k1_node(int ns, int nptn, int ncat, int isRoot, double* __restri
 // Leaf eigen-space partial: column of U^-1 for the observed state (row-sum if ambiguous).
 __global__ void k_leaf_eig(int ns, int nptn, int ncat, const unsigned char* __restrict__ tipt, double* __restrict__ out);
 
+// Single-edge branch derivative (patlh/pdf/pddf) from the two endpoint eigen partials.
+__global__ void k2_derv(int ns, int nptn, int ncat,
+        const double* __restrict__ node_eig, const double* __restrict__ dad_eig,
+        double* __restrict__ pdf, double* __restrict__ pddf, double* __restrict__ patlh);
+
 // Preorder "rest of tree" eigen-space partial above edge u->v (parent branch applied).
 __global__ void kj_pre(int ns, int nptn, int ncat, double* __restrict__ out_pre,
         const double* __restrict__ pre_u, const double* __restrict__ expfac_u,
