@@ -17,7 +17,7 @@
  *   Free Software Foundation, Inc.,                                       *
  *   59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.             *
  ***************************************************************************/
-#include <cmath>          // std::isnan for the JOLT eligibility/fallback check
+#include <cmath>          // std::isnan for the joint-optimiser eligibility/fallback check
 #include "rateinvar.h"
 #include "modelfactory.h"
 #include "rategamma.h"
@@ -1370,9 +1370,9 @@ double ModelFactory::optimizeParametersGammaInvar(int fixed_len, bool write_info
         return optimizeParameters(fixed_len, write_info, logl_epsilon, gradient_epsilon);
     // Number of +I+G restart points. The multi-start loop below escapes the pinv-alpha ridge: it seeds the
     // optimiser from initPInv = MIN_PINVAR .. frac_const in (n_pinv_starts-1) equal steps and keeps the best.
-    // CPU default is 10. Under --jolt, JOLT joint-optimises branches, alpha and pinv reliably for small pinv
+    // CPU default is 10. Under --jolt, joint-optimiser joint-optimises branches, alpha and pinv reliably for small pinv
     // moves but stalls on large pinv travel, so a single start is unsafe; 4 spanning starts suffice (one always
-    // lands near the optimum and JOLT polishes it locally) and give the same MLE as 10 starts.
+    // lands near the optimum and joint-optimiser polishes it locally) and give the same MLE as 10 starts.
     int n_pinv_starts = 10;
 #ifdef IQTREE_GPU
     {
@@ -1587,27 +1587,27 @@ double ModelFactory::optimizeParameters(int fixed_len, bool write_info,
     ASSERT(tree);
 
 #ifdef IQTREE_GPU
-    // GPU JOLT joint-gradient optimiser. For JOLT-eligible candidates (fixed-Q reversible model, ns in {4,20},
+    // GPU joint-gradient optimiser. For joint-optimiser-eligible candidates (fixed-Q reversible model, ns in {4,20},
     // no +I, gamma-or-uniform) replace the per-edge Gauss-Seidel branch-opt + alpha-Brent loop with a single
-    // joint LM step over (all branches + alpha) on the GPU. optimizeParametersJOLT() writes the result back
+    // joint LM step over (all branches + alpha) on the GPU. optimizeParametersGpuJoint() writes the result back
     // through the cache-invalidating setters and self-checks against a fresh CPU computeLikelihood; it returns
     // NaN for ineligible regimes or CUDA errors, in which case we fall through to the standard CPU path below.
     if (tree->params && tree->params->jolt) {
         ModelSubst *jm = tree->getModel();
         if (jm && jm->getNMixtures() > 1) {
-            // The host-driven profile-mixture optimiser (optimizeParametersJOLTMix) is correct but
+            // The host-driven profile-mixture optimiser (optimizeParametersGpuJointMix) is correct but
             // launch-latency-bound: it converges monotonically to the fixed-weight optimum, but slowly
             // (per-tree-node kernel launches plus a host echild rebuild and re-upload every sweep). It serves as
             // a reference and is off by default until the device-resident mixture optimiser lands. Opt in with
             // JOLT_MIX_HOSTDRIVEN=1; without the flag, mixtures fall through to the fast CPU path below.
             if (getenv("JOLT_MIX_HOSTDRIVEN")) {
-                double jolt_lh = tree->optimizeParametersJOLTMix(fixed_len);
+                double jolt_lh = tree->optimizeParametersGpuJointMix(fixed_len);
                 if (!std::isnan(jolt_lh))
                     return jolt_lh;
             }
             // else: fall through to CPU
         } else {
-            double jolt_lh = tree->optimizeParametersJOLT(fixed_len);
+            double jolt_lh = tree->optimizeParametersGpuJoint(fixed_len);
             if (!std::isnan(jolt_lh))
                 return jolt_lh;
         }

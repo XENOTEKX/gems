@@ -2112,21 +2112,21 @@ public:
         tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
     double gpuComputeTreeLnLCleanRoom(double *out_patlh);
 
-    /** GPU JOLT joint-gradient optimiser entry for ONE candidate model. Replaces IQ-TREE's
+    /** GPU joint-gradient optimiser entry for ONE candidate model. Replaces IQ-TREE's
         per-edge Gauss-Seidel optimizeAllBranches + alpha-Brent with a single joint LM diagonal-Newton loop over
         (all branches + gamma alpha), run on the GPU (gpu_joint_optimize). Builds the reference inputs from the
         LIVE model/site_rate/tree/alignment, runs the optimiser, writes the optimised branch lengths + alpha back
         through the cache-invalidating setters (setGammaShape + clearAllPartialLH), and self-checks that a fresh
-        CPU computeLikelihood() reproduces the JOLT lnL (rel <= 1e-9). Returns the optimised lnL, or NaN if the
-        regime is JOLT-ineligible / a CUDA error occurs -- the caller (ModelFactory::optimizeParameters) then falls
+        CPU computeLikelihood() reproduces the joint-optimiser lnL (rel <= 1e-9). Returns the optimised lnL, or NaN if the
+        regime is joint-optimiser-ineligible / a CUDA error occurs -- the caller (ModelFactory::optimizeParameters) then falls
         back to the standard CPU/stateless-GPU path. Defined only in tree/phylotreegpu.cpp under #ifdef IQTREE_GPU. */
-    double optimizeParametersJOLT(int fixed_len, bool brlenOnly = false, bool leanTail = false, int brlenMaxIter = 400);
+    double optimizeParametersGpuJoint(int fixed_len, bool brlenOnly = false, bool leanTail = false, int brlenMaxIter = 400);
 
-    /** lean in-loop JOLT all-branch reopt -- the GPU replacement for optimizeAllBranches(1) in the
-        NNI search loop (the optallbranches 19.5% surface). Thin wrapper over optimizeParametersJOLT with brlenOnly=true
+    /** lean in-loop joint-optimiser all-branch reopt -- the GPU replacement for optimizeAllBranches(1) in the
+        NNI search loop (the optallbranches 19.5% surface). Thin wrapper over optimizeParametersGpuJoint with brlenOnly=true
         (model params held FIXED: optAlpha=optPinv=nFreeQ=0; only branch lengths move) and leanTail=true (write back
         brlens, clearAllPartialLH flag-flip, trust the device lnL -- NO full CPU computeLikelihood() self-check, the
-        ModelFinder-only D4 gain-eraser). NOT bit-exact (JOLT converges harder than a single CPU sweep). Returns the
+        ModelFinder-only D4 gain-eraser). NOT bit-exact (joint-optimiser converges harder than a single CPU sweep). Returns the
         device lnL, or NaN -> caller falls back to optimizeAllBranches(1). Defined only under #ifdef IQTREE_GPU.
         DEFAULT maxiter=2 (was 12) -- for the --ts-fused GPU search path only (the 4 callers; CPU search unaffected).
         An INTERMEDIATE NNI topology's reopt need not converge to 1e-7 (the topology changes next round). VALIDATED
@@ -2134,20 +2134,20 @@ public:
         LG+G4 INFERRED (mi1 tied at +0.0000, mi2 subset of mi1 in convergence -- the mi2 arm was not run). ~2.5x wall (AA-100K
         1712->690s). HONEST CAVEATS: (1) the final best tree is CPU-reconverged
         (optimizeModelParameters->optimizeAllBranches) ONLY on modelEps-improving rounds (iqtree.cpp:3565); on other
-        rounds the registered lnL is the JOLT-capped value, so a lower cap can shift the FINAL lnL by O(1e-3) at FIXED
+        rounds the registered lnL is the joint-optimiser-capped value, so a lower cap can shift the FINAL lnL by O(1e-3) at FIXED
         topology -- DNA-200tx mi2 dlnL=-0.0008 (RF==0). Scientifically negligible (~7e-11 rel, << any BIC threshold),
         but real. (2) UNTESTED: trajectory-divergence (no escape dataset escaped in validation) + multi-seed (all
         seed 1). Owed before this graduates beyond the --ts-fused research path. JOLT_BRLEN_MAXITER env overrides
         (>0 caps, <0 skips->CPU; default-2 is byte-identical to env=2). */
-    double optimizeAllBranchesJOLT(int maxiter = 2);
+    double optimizeAllBranchesGpuJoint(int maxiter = 2);
 
-    /** GPU JOLT optimiser for NON-FUSED PROFILE-MIXTURE models (C20/C30/C60/MEOW...). The mixture
-        analogue of optimizeParametersJOLT, dispatched from ModelFactory::optimizeParameters under --jolt when
+    /** GPU joint optimiser for NON-FUSED PROFILE-MIXTURE models (C20/C30/C60/MEOW...). The mixture
+        analogue of optimizeParametersGpuJoint, dispatched from ModelFactory::optimizeParameters under --jolt when
         getNMixtures()>1. Optimises (all branches + gamma alpha) on the GPU over the regime axis r=m*ncat+c, holding
         the class WEIGHTS FIXED (eligibility gate model->getNDim()==0 => fix_prop && no free per-class freq/Q params),
         then writes back + self-checks vs a fresh CPU computeLikelihood (rel<=1e-6 -> NaN/CPU fallback). Returns the
         optimised lnL, or NaN if the regime is ineligible / a CUDA error occurs. Defined only under #ifdef IQTREE_GPU. */
-    double optimizeParametersJOLTMix(int fixed_len);
+    double optimizeParametersGpuJointMix(int fixed_len);
 
     /** GPU override for computeLikelihoodBranchPointer (byte-matches ComputeLikelihoodBranchType).
         Returns the whole-tree lnL via gpuComputeTreeLnLCleanRoom (reversible => branch-independent), mirrors the
@@ -2338,7 +2338,7 @@ public:
 	//   top-level (doTreeSearch main loop): perturb + nnisearch + mpi  (+ one-time initcand)
 	//   sub-phases nested inside nnisearch: evalnni + optallbr + optmodel
 	double tsd_t_perturb, tsd_t_nnisearch, tsd_t_evalnni, tsd_t_optallbr, tsd_t_optmodel, tsd_t_mpi, tsd_t_initcand;
-	double tsd_t_fusedreopt = 0.0;   // the --ts-fused optimizeAllBranchesJOLT reopt wall (legacy tsd_t_optallbr reads 0 in fused)
+	double tsd_t_fusedreopt = 0.0;   // the --ts-fused optimizeAllBranchesGpuJoint reopt wall (legacy tsd_t_optallbr reads 0 in fused)
 	long long tsd_n_iter, tsd_n_branches_eval, tsd_n_positive, tsd_n_applied, tsd_n_derv;
 
 	// --ts-reopt-split accumulators (B6; gated by params->ts_reopt_split; zero-cost when off).

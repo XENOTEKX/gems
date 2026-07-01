@@ -2920,9 +2920,9 @@ public:
     bool gpu;
 
     /**
-     *  TRUE to use the GPU JOLT joint-gradient optimiser (set by --jolt; requires --gpu).
+     *  TRUE to use the GPU joint-gradient optimiser (set by --jolt; requires --gpu).
      *  Replaces the per-edge Gauss-Seidel branch-opt + alpha-Brent with a single joint LM
-     *  diagonal-Newton step over (all branches + alpha) for JOLT-eligible candidates
+     *  diagonal-Newton step over (all branches + alpha) for joint-optimiser-eligible candidates
      *  (fixed-Q reversible model, ns in {4,20}, no +I, gamma-only or no rate het). Default false.
      */
     bool jolt;
@@ -2946,7 +2946,7 @@ public:
 
     /**
      *  TRUE to force the CPU path in a GPU-enabled (IQTREE_GPU=ON) build (set by --no-jolt / --cpu).
-     *  In the GPU build, GPU/JOLT is default-ON unless this is set; lets the GPU binary run the
+     *  In the GPU build, GPU/joint-optimiser is default-ON unless this is set; lets the GPU binary run the
      *  CPU path for A/B parity. No effect in the CPU-only build. Default false.
      */
     bool no_gpu;
@@ -2958,7 +2958,7 @@ public:
         Adds one extra per-NNI-move likelihood eval; result-invariant; off by default. */
     bool ts_reopt_split;
 
-    /** TRUE to emit host-rebuild-cost timing for optimizeParametersJOLT (set by --jolt-diag). Also exports
+    /** TRUE to emit host-rebuild-cost timing for optimizeParametersGpuJoint (set by --jolt-diag). Also exports
         env JOLT_DIAG so the CUDA TU can gate the echild timer. Result-invariant (timers + printf only);
         off by default. */
     bool jolt_diag;
@@ -3017,18 +3017,18 @@ public:
     int ts_adaptive_kmax;
     double ts_adaptive_delta;
 
-    /** Replace the post-NNI CPU optimizeAllBranches(1) with a lean in-loop JOLT all-branch reopt (GPU build;
-        optimizeAllBranchesJOLT -> brlen-only gpu_joint_optimize, lean tail: no clearAllPartialLH or CPU
-        self-check). NaN -> CPU fallback. Not bit-exact (JOLT converges harder than a single CPU sweep), so
+    /** Replace the post-NNI CPU optimizeAllBranches(1) with a lean in-loop joint-optimiser all-branch reopt (GPU build;
+        optimizeAllBranchesGpuJoint -> brlen-only gpu_joint_optimize, lean tail: no clearAllPartialLH or CPU
+        self-check). NaN -> CPU fallback. Not bit-exact (joint-optimiser converges harder than a single CPU sweep), so
         it is gated on quality, not byte-identity. Off by default. */
     bool ts_jolt_allbr;
 
     /** Apply the fused selection rule on the CPU path for validation (--ts-shadow, CPU-only build): apply the
         compatible node-disjoint old-length-positive (preloglh>cur) subset topology-only, then one global
-        optimizeAllBranches reopt as a JOLT stand-in, with round-level accept/rollback and a single-best nni5
+        optimizeAllBranches reopt as a joint-optimiser stand-in, with round-level accept/rollback and a single-best nni5
         fallback, so the final tree matches what the fused loop would produce. Implies ts_reopt_split and
         TS_CLEAN_PRE (pristine old-length scores). ts_shadow_converge uses optimizeAllBranches(100) to bracket
-        JOLT's converged reopt strength (the single-sweep stand-in is otherwise pessimistic). Off by default. */
+        joint-optimiser's converged reopt strength (the single-sweep stand-in is otherwise pessimistic). Off by default. */
     bool ts_shadow;
     bool ts_shadow_converge;
 
@@ -3041,7 +3041,7 @@ public:
     bool ts_lbr_measure;
 
     /** Fused NNI loop (GPU): replace per-move nni5 with screener-positive selection plus one global
-        optimizeAllBranchesJOLT. --ts-fused-check validates only (proves enumerateNNIGeometry and the screener
+        optimizeAllBranchesGpuJoint. --ts-fused-check validates only (proves enumerateNNIGeometry and the screener
         mapping per branch via indexed g[cnt]==preloglh[cnt]; applies nothing, trajectory byte-identical).
         --ts-fused is the production fused apply. ts_fused_nni5_topm M still runs exact nni5 on the top-M
         screener branches to catch late-bloomers and fused-applies the rest; 0 = pure fused. Off by default. */

@@ -934,7 +934,7 @@ void IQTree::initCandidateTreeSet(int nParTrees, int nNNITrees) {
             // score is always a real all-branch lnL. Disable with TS_INIT_JOLT_OFF=1 (A/B reference). CPU path
             // is byte-identical when ts_fused is off or in non-GPU builds.
             if (params->ts_fused && getenv("TS_INIT_JOLT_OFF") == nullptr) {
-                double _jb = optimizeAllBranchesJOLT();
+                double _jb = optimizeAllBranchesGpuJoint();
                 if (_jb == _jb) {                                       // GPU succeeded (finite)
                     curScore = _jb;
                     treeString = getTreeString();
@@ -2864,7 +2864,7 @@ double IQTree::doTreeSearch() {
         cout << "TS-DIAG nnisearch           " << tsd_t_nnisearch << "   (nested: evalnni+optallbr+optmodel)" << endl;
         cout << "TS-DIAG   evalnni           " << tsd_t_evalnni << "   (screener: gpuScreenNNIRank + host rebuild)" << endl;
         cout << "TS-DIAG   optallbranches    " << tsd_t_optallbr << "   (legacy path only; 0 under --ts-fused)" << endl;
-        cout << "TS-DIAG   fused-reopt       " << tsd_t_fusedreopt << "   (--ts-fused optimizeAllBranchesJOLT, both call sites)" << endl;
+        cout << "TS-DIAG   fused-reopt       " << tsd_t_fusedreopt << "   (--ts-fused optimizeAllBranchesGpuJoint, both call sites)" << endl;
         cout << "TS-DIAG   host-bookkeeping  " << (tsd_t_nnisearch - tsd_t_evalnni - tsd_t_fusedreopt - tsd_t_optmodel)
              << "   (= nnisearch - evalnni - fused-reopt - optmodel; doNNIs/restore/clearLH/getBestNNIForBran/setup)" << endl;
         cout << "TS-DIAG   optmodel          " << tsd_t_optmodel << endl;
@@ -3800,7 +3800,7 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
             // ===== the PRODUCTION fused apply. positiveNNIs already carry screener
             // geometry + score (built in evaluateNNIsScreened with NO per-move nni5). This is the shadow-certified
             // SELECTION rule (easy+hard PASS) over the -gated GEOMETRY source, with the JOLT-stand-in replaced by
-            // the real GPU optimizeAllBranchesJOLT. Select old-length-positive (already filtered to gbest>curScore in
+            // the real GPU optimizeAllBranchesGpuJoint. Select old-length-positive (already filtered to gbest>curScore in
             // evaluateNNIsScreened), apply the compatible node-disjoint subset TOPOLOGY-ONLY, ONE global JOLT reopt,
             // round-level accept-or-rollback + single-best nni5 fallback (guarantees progress/termination via the stop
             // rule below). NaN JOLT (ineligible regime / CUDA error) -> exact CPU optimizeAllBranches(1) fallback.
@@ -3813,7 +3813,7 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
             doNNIs(appliedNNIs, /*changeBran=*/false); // TOPOLOGY ONLY (swapped subtree keeps OLD length = JOLT warm start)
 #ifdef IQTREE_GPU
             double _tsdr = params->ts_diag ? getRealTime() : 0.0;
-            double _jf = optimizeAllBranchesJOLT();    // ONE global GPU reopt over ALL branches
+            double _jf = optimizeAllBranchesGpuJoint();    // ONE global GPU reopt over ALL branches
             curScore = (_jf == _jf) ? _jf : optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
             if (params->ts_diag) tsd_t_fusedreopt += getRealTime() - _tsdr;
 #else
@@ -3835,7 +3835,7 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
                     doNNIs(one, /*changeBran=*/true);  // topology + nni5 newLen
 #ifdef IQTREE_GPU
                     double _tsdr2 = params->ts_diag ? getRealTime() : 0.0;
-                    double _jf2 = optimizeAllBranchesJOLT();
+                    double _jf2 = optimizeAllBranchesGpuJoint();
                     curScore = (_jf2 == _jf2) ? _jf2 : optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
                     if (params->ts_diag) tsd_t_fusedreopt += getRealTime() - _tsdr2;
 #else
@@ -4021,7 +4021,7 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
 #ifdef IQTREE_GPU
         // lean in-loop JOLT all-branch reopt. NaN (ineligible regime / CUDA error) -> exact CPU fallback.
         if (params->ts_jolt_allbr) {
-            double _jlnl = optimizeAllBranchesJOLT();
+            double _jlnl = optimizeAllBranchesGpuJoint();
             curScore = (_jlnl == _jlnl) ? _jlnl
                      : optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
         } else
@@ -4043,7 +4043,7 @@ pair<int, int> IQTree::optimizeNNI(bool speedNNI) {
                 double _tsda2 = params->ts_diag ? getRealTime() : 0.0;
 #ifdef IQTREE_GPU
                 if (params->ts_jolt_allbr) {
-                    double _jlnl2 = optimizeAllBranchesJOLT();
+                    double _jlnl2 = optimizeAllBranchesGpuJoint();
                     curScore = (_jlnl2 == _jlnl2) ? _jlnl2
                              : optimizeAllBranches(1, params->loglh_epsilon, PLL_NEWZPERCYCLE);
                 } else

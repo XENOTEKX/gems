@@ -5599,7 +5599,7 @@ void parseArg(int argc, char *argv[], Params &params) {
                 continue;
             }
             if (strcmp(argv[cnt], "--jolt-diag") == 0) {
-                // time the optimizeParametersJOLT host-rebuild (per-eval echild cost) against the device
+                // time the optimizeParametersGpuJoint host-rebuild (per-eval echild cost) against the device
                 params.jolt_diag = true;
                 setenv("JOLT_DIAG", "1", 1);   // gate the CUDA-TU echild timer (it cannot see Params)
                 continue;
@@ -5689,7 +5689,7 @@ void parseArg(int argc, char *argv[], Params &params) {
                 // read-only: rides the --ts-shadow-converge apply path to measure the moved-branch fraction by distance.
                 // Implies ts_shadow + ts_shadow_converge so the instrument cannot silently no-op if the user forgets
                 // them, and ts_reopt_split (getBestNNIForBran preloglh). The shadow per-round reopt
-                // = optimizeAllBranches(100) = the brlen-only converged stand-in for the GPU optimizeAllBranchesJOLT,
+                // = optimizeAllBranches(100) = the brlen-only converged stand-in for the GPU optimizeAllBranchesGpuJoint,
                 // which is also brlen-only (brlenOnly=true => optAlpha=optPinv=nFreeQ=0), so the stand-in is faithful.
                 params.ts_lbr_measure = true;
                 params.ts_shadow = true;
