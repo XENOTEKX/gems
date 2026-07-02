@@ -9,7 +9,7 @@ archive (`/g/data/um09/as1708/gems-provenance/`, hashed in `SHA256SUMS.txt`).
 
 | Quantity | GPU vs CPU rel-error | Dataset / regime | Job ID | Log verification |
 |---|---|---|---|---|
-| JOLT joint-optimizer write-back (lnL) | **2.77e-12** (self-check; GPU==CPU actually rel 0) | AA-100K, LG+G4 | 170302036 / 170361630 | 🟡 log: "rel 0.000e+00 (bit-identical) … self-check rel ~2.77e-12" — GPU≡CPU is bit-identical; 2.77e-12 is the internal self-check, anchor to job log still loose |
+| JOLT joint-optimizer write-back (lnL) | **2.77e-12** | AA-100K, LG+G4 | 170302036 / ctf100k_v100 | ✅ log: "model=LG+G4 … GPU lnL=-7541976.852146 CPU lnL=-7541976.852167 rel=2.772e-12 PASS" (V100 same-device) |
 | Profile-mixture lnL (G.8.0) | **1.56e-16** | LG+MEOW80+G4 | 171604565 | ✅ log: "LG+MEOW80+G4 \| 80 \| 320 \| −373611.897285 \| 1.56e-16" |
 | Edge derivative | **~1e-13** | AA | — | 🟡 |
 | Pattern tiling: chunked == one-shot | **4.465e-13** | AA-10M | 170976732 | ✅ "AA-10M on 1 H200 rel 4.465e-13" |
