@@ -1,0 +1,17 @@
+tool	jolt
+type	DNA
+scale	100000
+bin_md5	2c931f41
+aln_md5	7f368661
+mf_model	F81+F+G4
+mf_wall	662.607
+mf_lnl	-5692984.526
+mf_rc	0
+mf_kern	Kernel:  JOLT + CTF - 12 threads (12 CPU cores detected)
+ts_wall	340.898428
+ts_total	345.205582
+ts_score	-5692972.987617
+ts_rc	0
+ts_kern	Kernel:  JOLT - 12 threads (12 CPU cores detected)
+jobid	172836785
+when	2026-07-02T14:05:58+10:00

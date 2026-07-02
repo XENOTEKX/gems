@@ -1,0 +1,8 @@
+# JOLT vs BEAGLE 4.0 — matched single-sweep kernel micro-benchmark (H200, FP64, synthetic, states=20 nTaxa=100 nCat=4)
+# op: lnl = one post-order sweep + root lnL (JOLT k1_node vs BEAGLE updatePartials+rootLogLikelihoods)
+#     grad = one pre-order sweep + all-branch edge derivatives (JOLT kj_pre vs BEAGLE)
+# ms = mean ms/eval over 20 reps after warmup; OOM = ran out of GPU memory. Job 171269929.
+# Durable logs: gems-provenance/reproductions/fig6_beagle_vs_jolt/ (hashed).
+op,nPat,jolt_ms,beagle_cudacore_ms,beagle_tensorcore_ms
+grad,100000,74.535,170.3629,82.0485
+lnl,1000000,111.057,OOM,OOM

@@ -1,0 +1,17 @@
+tool	naive
+type	AA
+scale	10000
+bin_md5	e713866b
+aln_md5	88d26f1b
+mf_model	LG+G4
+mf_wall	624.477
+mf_lnl	-807350.031
+mf_rc	0
+mf_kern	Kernel:  GPU - 12 threads
+ts_wall	306.886
+ts_total	309.866
+ts_score	-807350.032
+ts_rc	0
+ts_kern	Kernel:  GPU - 12 threads
+jobid	172832999
+when	2026-07-02T13:31:58+10:00

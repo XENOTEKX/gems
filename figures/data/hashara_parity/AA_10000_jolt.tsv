@@ -1,0 +1,17 @@
+tool	jolt
+type	AA
+scale	10000
+bin_md5	2c931f41
+aln_md5	88d26f1b
+mf_model	LG+G4
+mf_wall	900.180
+mf_lnl	-807350.031
+mf_rc	0
+mf_kern	Kernel:  JOLT + CTF - 12 threads (12 CPU cores detected)
+ts_wall	811.892806
+ts_total	816.594874
+ts_score	-807350.031281
+ts_rc	0
+ts_kern	Kernel:  JOLT - 12 threads (12 CPU cores detected)
+jobid	172832997
+when	2026-07-02T13:30:15+10:00
