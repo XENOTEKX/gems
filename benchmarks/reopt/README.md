@@ -86,7 +86,7 @@ either. Recorded as a caveat in
 # with no knob and MUST NOT be used. The harness self-gates on md5 + knob presence.
 qsub -q gpuhopper -lngpus=1 -lncpus=12 -lmem=90GB  -lwalltime=05:00:00 \
      -v TYPE=AA,SCALE=100000,SEEDS="1 2 3"  gems_reopt_pareto.sh   # 172882999
-qsub -q gpuhopper -lngpus=1 -lncpus=12 -lmem=90GB  -lwalltime=02:30:00 \
+qsub -q gpuhopper -lngpus=1 -lncpus=12 -lmem=90GB  -lwalltime=03:00:00 \
      -v TYPE=DNA,SCALE=100000,SEEDS="1 2 3" gems_reopt_pareto.sh   # 172883000
 qsub -q gpuhopper -lngpus=1 -lncpus=12 -lmem=120GB -lwalltime=05:00:00 \
      -v TYPE=DNA,SCALE=1000000,SEEDS="1"    gems_reopt_pareto.sh   # 172883001

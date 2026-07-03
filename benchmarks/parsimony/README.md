@@ -3,8 +3,8 @@
 ## Claim (corrected 2026-07-02 — supersedes the retired "3.76×")
 GPU 2D-grid Fitch start-tree construction is **bit-identical** to the CPU parsimony score. Its **speed is
 same-node neutral at AA-1M**: on the same H200 node, same frozen binary (`8cc3cb84`), same 12 threads, same
-seed, same alignment (md5 `da36879a`), the GPU 2D kernel and the CPU IQ-parsimony leg both take ~56.9 s
-(**0.998× — a tie**). A whole-box **deployment-frame** comparison (1×H200 + host cores vs a full 104-core
+seed, same alignment (md5 `da36879a`), the GPU 2D kernel and the CPU IQ-parsimony leg both take ~56.8–56.9 s
+(GPU 56.909 s, CPU 56.793 s → **0.998× — a tie**). A whole-box **deployment-frame** comparison (1×H200 + host cores vs a full 104-core
 `normalsr` node = 89.578 s) gives at most **1.57×**, but that answers a different question (which box you own).
 
 **Correctness is solid; per-model speed is not demonstrated at a million sites.** State those two separately.

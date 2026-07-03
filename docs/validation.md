@@ -16,7 +16,7 @@ archive (`/g/data/um09/as1708/gems-provenance/`, hashed in `SHA256SUMS.txt`).
 | Profile-mixture full real-data | **2.46e-13** | euk LG+MEOW80+G4 | 171733080 | ✅ "GPU lnL −1665670.997 == CPU rel 2.46e-13" |
 | +R / +I (ncat ≤ 4) | **≤ 5e-16** | AA/DNA-1M | 172451291 | ✅ log: LG rel 1.395e-16, LG+R2 2.925e-16, LG+R3 2.950e-16 — all "GPU lnL==CPU lnL … PASS" |
 | Tree-search screener topology | **RF = 0** (bit-identical NNI set) | AA-1M | 172194079 | ✅ log: "screener vs oracle", `wall_ratio 66.18×` |
-| Parsimony score (2D-grid Fitch) | **VERIFY mismatches = 0**; score 15488909 both legs | AA-10K/DNA-10K + AA-1M | 172862242 | ✅ 2× `[GPUPARS-B]` engaged; `VERIFY mismatches=0`; same-node/same-binary speed tie (56.9 vs 56.8 s) |
+| Parsimony score (2D-grid Fitch) | **VERIFY mismatches = 0**; score 15488909 both legs | AA-1M (score/speed) + AA-100K (VERIFY) | 172862242 | ✅ 2× `[GPUPARS-B]` engaged; `VERIFY mismatches=0`; same-node/same-binary speed tie (56.9 vs 56.8 s) |
 | Reopt-depth MLE invariance (m∈{4,2} vs m=12) | **\|ΔlnL\| ≤ 0.004 nat** (topology-identical; GPU-vs-GPU across the reopt depth-dial, *not* vs CPU) | AA-100K, DNA-100K (×3 seeds); DNA-1M (×1) | 172882999 / 172883000 / 172883001 | ✅ log: AA \|Δ\|≤1e-4; DNA-100K \|Δ\|≤0.0037 both signs; DNA-1M m≥2 \|Δ\|≤0.0011. **Identity asserted from lnL, not RF** (harness RF column is a parse bug); below floor, DNA-1M m=1 collapses −3139.83 nats → see honest-negatives. |
 | Full mixture real-data (LG+MEOW80+G4) | **2.46e-13** | euk, 1 H200 | 171733080 | JOLTMix engaged (172809011 `[JOLTMIX-DBG]`); full rel from 171733080 |
 | BEAGLE 4.0 cross-check (lnL) | identical to 1e-9 | AA-100K/1M | 171269929 | ✅ log: tensor==cuda lnL −7118563.14953 |
