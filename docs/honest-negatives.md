@@ -15,6 +15,7 @@ not made. Each has a job ID. Reviewers and examiners should read this alongside 
 | CTF "+I single-start ~2.7× over np16" | **Projected, not measured.** Cite only the measured 893 s / 1.26×. | 170581208 |
 | Tree-search **66× as end-to-end search** | It is a **clean-room screener primitive**. The integrated `--ts-fused` search is ≈ one CPU node and ~1.9× behind a competing OpenACC GPU at AA-1M. Keep screener-vs-search sharp. | 172194079 |
 | Parsimony **"71×"** *and* **"3.76×"** | The 4033 s ("71×") was a **PLL artifact** (IQ-TREE's own IQ-parsimony already beats PLL ~16–19× on CPU alone, a start-tree library choice, quality-identical). The **"3.76×" is also retired**: its CPU baseline was a throttled 12-core run on a slower binary (`2c931f41`). On a fair same-node/same-binary (`8cc3cb84`) basis the GPU 2D-grid kernel **ties** the CPU (0.998×, 56.9 vs 56.8 s), ≤**1.57×** in a whole-box deployment frame. The kernel is **bit-identical** (score 15488909, `VERIFY mismatches=0`, `[GPUPARS-B]` engaged); its **speed is not demonstrated at 1M** (a win may appear only at 10M). | 172862242 / 172862243 |
+| Reopt-depth sweep as a **basin-escape / quality win** (or as a GPU-vs-CPU speedup) | Sweeping GPU reopt depth m∈{12,4,2,1} produced **no genuine basin escape**: for m≥2, ΔlnL is noise (≤0.004 nat, both signs) at every scale/seed — same tree, less time. `m=2` is a **Pareto knee, not a quality dial**; its 1.24–2.43× figures are **GPU-vs-GPU across the reopt depth-dial, never GPU-vs-CPU**. Below the floor, DNA-1M **m=1 collapses −3139.83 nats and is *slower* than m=2** (2388 s vs 2092 s) — strictly dominated. | 172882999 / 172883000 / 172883001 |
 
 ## Experiments run and shelved (the negatives appendix)
 
@@ -31,6 +32,15 @@ not made. Each has a job ID. Reviewers and examiners should read this alongside 
 - **Rake batched-fold** — bit-identical but only 1.04× (compute-bound ceiling). (172635734.)
 - **incremental / dirty partials** — ruled out (diagonal-LM dirties all branches).
 - **site-subsample for tree search** — refuted (the projected gate gave 0/15 recall vs the native gate's 30/30).
+- **Reopt-depth basin-escape refuted** — the DNA "escape set" (DNA-100K GTR+G4, 3 seeds) did **not** escape:
+  ΔlnL both signs ≤ 0.004 nat vs m=12, and no deeper reopt found a better basin at any tested scale (m=2
+  already reaches the m=12 MLE). Consistent with the earlier "same tree, less time" refutation. (172883000;
+  AA-100K 172882999; DNA-1M 172883001.)
+- **`gems_reopt_pareto.sh` RF-vs-m12 column is a parser bug** — it prints RF = the maxiter digit (self-check
+  `RF(m12 vs m12) = 12`, which must be 0); the `grep -oE '[0-9]+' | tail -1` read the `…_m<K>` filename digits,
+  not the `Robinson-Foulds distance:` value. **Never cite these RF numbers.** The reopt "same tree" claim rests
+  on **lnL identity** (ΔlnL ≤ 0.004 nat for m≥2); treefile md5s differ by depth (branch lengths refine), so
+  byte-identity is not the test either. Cheap follow-up: fix the regex to read the `.rfdist`.
 - **Cook–Mertz tree-evaluation** — non-transferable to this problem.
 - **FP32 route-around** — designed but unbuilt; FP64 parity is non-negotiable for BIC ties, so this stays a
   design note, not a result.
