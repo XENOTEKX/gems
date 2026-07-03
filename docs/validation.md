@@ -37,9 +37,45 @@ archive (`/g/data/um09/as1708/gems-provenance/`, hashed in `SHA256SUMS.txt`).
 - **FP64 is non-negotiable** for BIC model selection: a wrong low-order bit can flip a BIC tie between two
   models, so the FP32 route-around (designed, unbuilt) is deliberately not used.
 
+## §3f — Result-identity when GPU is off (the upstream merge gate)
+
+The invariant a maintainer requires before accepting an optional GPU module: **built with `-DIQTREE_GPU=OFF`,
+the fork's CPU path behaves identically to upstream IQ-TREE 3.1.2.** This holds, verified both empirically and
+structurally. The two binaries are **result-identical, not byte-identical** — the correct and stated bar (the
+GPU-off build still *compiles* the inert, never-called GPU-dispatch functions, so its md5 differs).
+
+**Empirical (job 172924601, `tests/cpu_off_parity.sh`).** Two CPU-only binaries are built from the same tree —
+`main` (= upstream 3.1.2) and `wip-extract` (GPU compiled out) — and run single-threaded (upstream's
+`schedule(dynamic,1)` is otherwise low-bit non-deterministic) on the bundled `example.phy` across `-m MF`,
+`-m MFP`, and `-m GTR+G4`. The best-fit model, the full BIC score table, **every** scientific line of the
+`.iqtree` report, and the exact `.treefile` (topology + branch lengths) are **identical** across all three
+modes; the only differing line is the wall-clock timestamp. This exercises the ModelFinder path *and* the
+tree-search path (`iqtree.cpp` / `phylotree.*` / `phylotreepars.cpp`). Binaries md5-differ (`282d0bc9…` base
+vs `f0b9a10d…` ext) — result-identical, not byte-identical.
+
+**Structural (why it holds).**
+- `IQTREE_GPU` is a CMake option **defaulting OFF**; when off no CUDA language is enabled, no `.cu` source is
+  compiled, nothing is CUDA-linked, and the `IQTREE_GPU` macro is undefined.
+- The GPU kernels (`tree/gpu/*.cu`) and the host integration layer (`tree/phylotreegpu.cpp`, a single
+  `#ifdef IQTREE_GPU` → an empty translation unit when off) are absent from the CPU-off build.
+- The new runtime flags — `gpu`, `gpu_joint`, `ctf`, `no_gpu` — all **initialise `false`** (`utils/tools.cpp`);
+  the new code is entered only through them (e.g. the CTF ModelFinder driver only via
+  `if (params.ctf && runCTFModelFinder(...))`, `main/phyloanalysis.cpp`). A default run never enters it.
+- The new dispatch code in shared files references **no GPU-only symbol** — GPU acceleration is installed by
+  overriding the likelihood-kernel function pointers at the `setLikelihoodKernel` funnel (inside the guarded
+  `phylotreegpu.cpp`), so the CPU-off build links cleanly and the CPU funnel is byte-for-byte the upstream path.
+
+**Scope.** Verified on the DNA `example.phy` single-threaded; a broader sweep (AA data, partition models,
+`+R`/mixture regimes, multi-thread) is the natural extension. `wip-extract` carries the GPU work only (the
+separate `fca-cpu` CPU contributions are not in it), so this isolates the GPU module's effect vs a pristine
+3.1.2 base.
+
 ## How each proof is run
 
-The runtime cross-checks (`tests/gpu/`, the `--ts-*-check` / `GPU_PARSIMONY_VERIFY` drivers) run **only on
-Gadi as PBS jobs** — GitHub-hosted CI runners have no GPU. CI builds the CPU-OFF path, asserts the CPU source
-is unchanged vs upstream, and *compiles* the GPU path; it does **not** execute any GPU kernel. The runtime
-proofs' logs are the evidence of record and are preserved (hashed) in the durable archive.
+The runtime cross-checks (`tests/gpu/`, the `--ts-*-check` / `GPU_PARSIMONY_VERIFY` drivers) and the §3f
+result-identity job run **only on Gadi as PBS jobs** — GitHub-hosted CI runners have no GPU. CI builds the
+CPU-OFF path and *compiles* the GPU path (behind a CUDA-toolkit action); it does **not** execute any GPU kernel
+or the result-identity build-and-diff. The GPU work adds guarded code to shared CPU files, so the source is
+*not* unchanged vs upstream — what is asserted, on Gadi, is that the CPU-OFF **build result** is identical
+(job 172924601). The runtime proofs' logs are the evidence of record and are preserved (hashed) in the durable
+archive.
