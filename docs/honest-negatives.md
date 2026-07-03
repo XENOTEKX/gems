@@ -14,7 +14,7 @@ not made. Each has a job ID. Reviewers and examiners should read this alongside 
 | Profile mixtures as **production** | Validated but **env-gated** (`JOLT_MIX_HOSTDRIVEN`); the aggregate-throughput story that would justify default-on is unwritten. | 171733080 |
 | CTF "+I single-start ~2.7× over np16" | **Projected, not measured.** Cite only the measured 893 s / 1.26×. | 170581208 |
 | Tree-search **66× as end-to-end search** | It is a **clean-room screener primitive**. The integrated `--ts-fused` search is ≈ one CPU node and ~1.9× behind a competing OpenACC GPU at AA-1M. Keep screener-vs-search sharp. | 172194079 |
-| Parsimony **"71×"** | The 4033 s figure was a **PLL artifact**; IQ-TREE's own IQ-parsimony already beats PLL ~16–19× on CPU alone (a start-tree library swap, quality-identical). The genuine GPU-over-best-CPU win is **3.76×**. | 172524833 / 172526962 |
+| Parsimony **"71×"** *and* **"3.76×"** | The 4033 s ("71×") was a **PLL artifact** (IQ-TREE's own IQ-parsimony already beats PLL ~16–19× on CPU alone, a start-tree library choice, quality-identical). The **"3.76×" is also retired**: its CPU baseline was a throttled 12-core run on a slower binary (`2c931f41`). On a fair same-node/same-binary (`8cc3cb84`) basis the GPU 2D-grid kernel **ties** the CPU (0.998×, 56.9 vs 56.8 s), ≤**1.57×** in a whole-box deployment frame. The kernel is **bit-identical** (score 15488909, `VERIFY mismatches=0`, `[GPUPARS-B]` engaged); its **speed is not demonstrated at 1M** (a win may appear only at 10M). | 172862242 / 172862243 |
 
 ## Experiments run and shelved (the negatives appendix)
 

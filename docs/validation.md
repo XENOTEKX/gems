@@ -16,7 +16,7 @@ archive (`/g/data/um09/as1708/gems-provenance/`, hashed in `SHA256SUMS.txt`).
 | Profile-mixture full real-data | **2.46e-13** | euk LG+MEOW80+G4 | 171733080 | ✅ "GPU lnL −1665670.997 == CPU rel 2.46e-13" |
 | +R / +I (ncat ≤ 4) | **≤ 5e-16** | AA/DNA-1M | 172451291 | ✅ log: LG rel 1.395e-16, LG+R2 2.925e-16, LG+R3 2.950e-16 — all "GPU lnL==CPU lnL … PASS" |
 | Tree-search screener topology | **RF = 0** (bit-identical NNI set) | AA-1M | 172194079 | ✅ log: "screener vs oracle", `wall_ratio 66.18×` |
-| Parsimony score (2D-grid Fitch) | **VERIFY mismatches = 0** | AA-10K, DNA-10K | 172524833 | ✅ log: "AA10 2D: VERIFY mismatches=0", "DNA10 2D: VERIFY mismatches=0" |
+| Parsimony score (2D-grid Fitch) | **VERIFY mismatches = 0**; score 15488909 both legs | AA-10K/DNA-10K + AA-1M | 172862242 | ✅ 2× `[GPUPARS-B]` engaged; `VERIFY mismatches=0`; same-node/same-binary speed tie (56.9 vs 56.8 s) |
 | Full mixture real-data (LG+MEOW80+G4) | **2.46e-13** | euk, 1 H200 | 171733080 | JOLTMix engaged (172809011 `[JOLTMIX-DBG]`); full rel from 171733080 |
 | BEAGLE 4.0 cross-check (lnL) | identical to 1e-9 | AA-100K/1M | 171269929 | ✅ log: tensor==cuda lnL −7118563.14953 |
 
